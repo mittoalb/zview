@@ -370,27 +370,35 @@ class VisPy3DView(QtWidgets.QWidget):
                     print(f"Error setting intensity range: {e}")
     
     def _auto_adjust_intensity(self):
-        """Auto-adjust intensity range based on percentiles"""
+        """Auto-adjust intensity range based on percentiles (robust, fast)."""
         if self.volume_data is None:
             return
-        
         try:
-            # Use 1st and 99th percentile
-            vol_min = float(np.percentile(self.volume_data, 1))
-            vol_max = float(np.percentile(self.volume_data, 99))
-            
-            # Normalize to 0-100 range based on original data range
-            data_min = float(self.volume_data.min())
-            data_max = float(self.volume_data.max())
-            data_range = data_max - data_min
-            
-            if data_range > 0:
-                min_percent = int(((vol_min - data_min) / data_range) * 100)
-                max_percent = int(((vol_max - data_min) / data_range) * 100)
-                
-                self.intensity_min_slider.setValue(max(0, min_percent))
-                self.intensity_max_slider.setValue(min(100, max_percent))
-            
+            # work in float, optionally sample if huge for speed
+            v = np.asarray(self.volume_data, dtype=np.float32)
+            if v.size > 8_000_000:
+                # sample 1M voxels for speed
+                idx = np.random.default_rng(0).choice(v.size, size=1_000_000, replace=False)
+                sample = v.reshape(-1)[idx]
+            else:
+                sample = v
+
+            # robust percentiles
+            p1  = float(np.percentile(sample, 1))
+            p99 = float(np.percentile(sample, 99))
+
+            data_min = float(np.nanmin(v))
+            data_max = float(np.nanmax(v))
+            rng = data_max - data_min
+
+            if rng > 0 and np.isfinite(rng):
+                min_percent = int(np.clip(((p1  - data_min) / rng) * 100.0, 0, 100))
+                max_percent = int(np.clip(((p99 - data_min) / rng) * 100.0, 0, 100))
+                if max_percent <= min_percent:
+                    max_percent = min(100, min_percent + 1)
+
+                self.intensity_min_slider.setValue(min_percent)
+                self.intensity_max_slider.setValue(max_percent)
         except Exception as e:
             print(f"Error auto-adjusting intensity: {e}")
     
@@ -476,14 +484,25 @@ class VisPy3DView(QtWidgets.QWidget):
             self.volume_visual.parent = None
             self.volume_visual = None
         
-        # Normalize volume data
-        vol_min, vol_max = self.volume_data.min(), self.volume_data.max()
-        if vol_max > vol_min:
-            vol_normalized = (self.volume_data - vol_min) / (vol_max - vol_min)
+        # Normalize volume data (robust, no overflow)
+        v = np.asarray(self.volume_data, dtype=np.float32)  # upcast once, no copy if already float
+        vol_min = float(np.nanmin(v))
+        vol_max = float(np.nanmax(v))
+        rng = vol_max - vol_min
+
+        if not np.isfinite(rng) or rng <= 0.0:
+            vol_normalized = np.zeros_like(v, dtype=np.float32)
         else:
-            vol_normalized = np.zeros_like(self.volume_data, dtype=np.float32)
-        
-        vol_normalized = vol_normalized.astype(np.float32)
+            # do math in float32 explicitly; clip to [0,1]
+            vol_normalized = np.subtract(v, vol_min, dtype=np.float32)
+            vol_normalized /= rng
+            np.clip(vol_normalized, 0.0, 1.0, out=vol_normalized)
+
+        # Apply threshold (works on float32 safely)
+        threshold = self.threshold_slider.value() / 100.0
+        if threshold > 0:
+            vol_normalized[vol_normalized < threshold] = 0.0
+
         
         # Apply threshold
         threshold = self.threshold_slider.value() / 100.0

@@ -1952,7 +1952,7 @@ def main():
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
     
-    app.setApplicationName("Unified Zarr Viewer - 2D/3D Multi-Resolution (VisPy 3D)")
+    app.setApplicationName("ZVIEW")
     apply_dark_theme(app)
     
     viewer = UnifiedZarrViewer()

@@ -1,0 +1,13 @@
+conda
+
+pyqtgraph
+z5py
+pyqt
+
+
+
+
+pip
+
+PyOpenGL PyOpenGL_accelerate
+vispy
