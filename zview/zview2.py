@@ -5,13 +5,37 @@ from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
-import z5py
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from zview.sview import DynamicImageView
 from zview.oview import OrthoImageView
 from zview.meta import MetadataViewer
 from zview.msres import MultiResolutionImage
+
+
+def _open_dataset(path):
+    """Open a Zarr v2, Zarr v3, or N5 store and return (root_group, backend).
+
+    `zarr-python` handles both v2 and v3 natively; `z5py` is kept as a fallback
+    for N5 (which the zarr library doesn't open).
+    """
+    import zarr  # noqa: PLC0415
+    try:
+        return zarr.open_group(str(path), mode='r'), 'zarr'
+    except Exception as zarr_err:
+        try:
+            import z5py  # noqa: PLC0415
+            # z5py: use_zarr_format controls Zarr vs N5. Detect from marker files.
+            p = Path(path)
+            looks_like_zarr = any(p.glob('.zgroup')) or any(p.glob('.zarray')) or (p / 'zarr.json').exists()
+            return (
+                z5py.File(str(path), mode='r', use_zarr_format=looks_like_zarr),
+                'z5py',
+            )
+        except Exception as z5_err:
+            raise RuntimeError(
+                f"Could not open {path!r}:\n  zarr-python: {zarr_err}\n  z5py: {z5_err}"
+            ) from zarr_err
 
 pg.setConfigOptions(imageAxisOrder='row-major')
 
@@ -1309,11 +1333,12 @@ class UnifiedZarrViewer(QtWidgets.QDialog):
             if self.zarr_store is not None:
                 try:
                     self.zarr_store.close()
-                except:
+                except Exception:
                     pass
-            
-            self.zarr_store = z5py.File(path, mode='r', use_zarr_format=True)
+
+            self.zarr_store, backend = _open_dataset(path)
             self.zarr_group = self.zarr_store
+            print(f"[zview] opened {Path(path).name} via {backend}")
             
             self.multires_image = MultiResolutionImage(self.zarr_group)
             

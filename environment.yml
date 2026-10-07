@@ -5,7 +5,8 @@ dependencies:
   - python=3.10
   - pyqt
   - pyqtgraph
-  - z5py
+  - z5py          # N5 (and legacy Zarr v2 fallback)
+  - zarr>=3       # Zarr v2 and v3 reader
   - numpy
   - pip
   - pip:

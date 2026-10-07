@@ -1,14 +1,14 @@
 # zview
 
-A fast viewer for large multi-resolution Zarr / N5 image volumes. Built on
-PyQt5 + pyqtgraph, with chunk-aligned lazy loading, a parallel I/O thread
-pool, and automatic pyramid-level selection.
+A fast viewer for large multi-resolution Zarr (v2 and v3) and N5 image
+volumes. Built on PyQt5 + pyqtgraph, with chunk-aligned lazy loading, a
+parallel I/O thread pool, and automatic pyramid-level selection.
 
 ## Features
 
 - **Multi-resolution pyramid support** — reads OME-NGFF v0.4 `multiscales`
-  metadata; also falls back to numbered subgroups (`0/`, `1/`, …) when none
-  is present.
+  metadata from Zarr v2, Zarr v3, or N5; also falls back to numbered
+  subgroups (`0/`, `1/`, …) when no metadata is present.
 - **Chunk-aligned, parallel loading** — only the chunks that cover the
   visible region are fetched, in parallel across a configurable thread pool.
 - **Automatic level selection with hysteresis** — picks the finest pyramid
