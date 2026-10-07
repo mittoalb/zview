@@ -1,0 +1,14 @@
+name: zview
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pyqt
+  - pyqtgraph
+  - z5py
+  - numpy
+  - pip
+  - pip:
+      - PyOpenGL
+      - PyOpenGL_accelerate
+      - vispy

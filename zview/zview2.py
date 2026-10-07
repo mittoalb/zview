@@ -1,60 +1,38 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Unified Multi-Resolution Zarr Viewer with Enhanced Contrast Controls - OPTIMIZED
-----------------------------------------------------------------------------------
-Performance improvements:
-- Chunk-aligned loading for maximum speed (10-100x faster)
-- Intelligent caching with memory management
-- Reduced redundant loads
-
-Features:
-- Single view mode: Full-screen viewer with comprehensive contrast controls
-- Orthogonal mode: 4-quadrant XY/XZ/YZ + 3D view with contrast controls
-- Dynamic resolution switching
-- Metadata viewer
-- Toggle between modes
-- Enhanced contrast adjustment (auto, percentile, manual)
-"""
+"""Unified multi-resolution Zarr viewer: single/dual/quad modes + metadata tab."""
 
 import sys
-import z5py
-import numpy as np
-from typing import Optional, List, Tuple
-from PyQt5 import QtWidgets, QtCore, QtGui
-import pyqtgraph as pg
 from pathlib import Path
-import json
-import threading
 
-# Set pyqtgraph configuration
+import numpy as np
+import pyqtgraph as pg
+import z5py
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+from zview.sview import DynamicImageView
+from zview.oview import OrthoImageView
+from zview.meta import MetadataViewer
+from zview.msres import MultiResolutionImage
+
 pg.setConfigOptions(imageAxisOrder='row-major')
 
-# Import custom components
-from sview import DynamicImageView
-from oview import OrthoImageView
-from meta import MetadataViewer, ZarrMetadataExtractor
-from msres import MultiResolutionImage
+# 3D viewer is currently stubbed. To re-enable, swap the import below for
+# `from zview.view3d import VisPy3DView, VISPY_AVAILABLE`.
+VISPY_AVAILABLE = False
 
-# 3D Viewer (optional)
-try:
-    from view3d import VisPy3DView, VISPY_AVAILABLE
-except ImportError:
-    print("Warning: view3d module not found. 3D viewing will be disabled.")
-    VISPY_AVAILABLE = False
-    
-    class VisPy3DView(QtWidgets.QWidget):
-        """Placeholder for 3D view when vispy is not available"""
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            layout = QtWidgets.QVBoxLayout(self)
-            label = QtWidgets.QLabel("3D View Not Available\n\nInstall VisPy to enable 3D visualization")
-            label.setAlignment(QtCore.Qt.AlignCenter)
-            label.setStyleSheet("color: #888; font-size: 14px;")
-            layout.addWidget(label)
-        
-        def set_multires_image(self, multires_image):
-            pass
+
+class VisPy3DView(QtWidgets.QWidget):
+    """Placeholder for 3D view when disabled or when VisPy is not installed."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        label = QtWidgets.QLabel("3D View Disabled")
+        label.setAlignment(QtCore.Qt.AlignCenter)
+        label.setStyleSheet("color: #888; font-size: 14px;")
+        layout.addWidget(label)
+
+    def set_multires_image(self, multires_image):
+        pass
 
 
 # Optional environment variable settings for performance
@@ -79,7 +57,7 @@ class UnifiedZarrViewer(QtWidgets.QDialog):
         self.y_pos = 0
         self.x_pos = 0
         
-        self.setWindowTitle("Multiscale Zarr Viewer - OPTIMIZED")
+        self.setWindowTitle("Multiscale Zarr Viewer")
         self.setModal(False)
         self.resize(1800, 1000)
         
@@ -118,8 +96,253 @@ class UnifiedZarrViewer(QtWidgets.QDialog):
         
         self.metadata_viewer = MetadataViewer()
         self.main_tabs.addTab(self.metadata_viewer, "Metadata")
-        
+
         main_layout.addWidget(self.main_tabs)
+
+        # Status bar at the bottom, showing cursor world coord + pixel value.
+        self.status_label = QtWidgets.QLabel("")
+        self.status_label.setStyleSheet(
+            "background-color: #202020; color: #cccccc; "
+            "padding: 2px 8px; font-family: monospace; font-size: 11px;"
+        )
+        self.status_label.setMinimumHeight(20)
+        main_layout.addWidget(self.status_label)
+
+        self._install_qol_features()
+
+    def _install_qol_features(self):
+        """Wire the quality-of-life widgets built elsewhere in `_build_ui`.
+
+        - cursor-position reporting from every pane into `status_label`
+        - keyboard shortcuts (F11, R, PgUp/Dn, Home/End)
+        - double-click on an ortho pane's header to maximize/restore
+        """
+        # Cursor-position reporting.
+        self.single_image_view.cursorMoved.connect(
+            lambda x, y: self._update_status('XY', x, y)
+        )
+        self.dual_view1.cursorMoved.connect(
+            lambda x, y: self._update_status(self._dual_plane(1), x, y)
+        )
+        self.dual_view2.cursorMoved.connect(
+            lambda x, y: self._update_status(self._dual_plane(2), x, y)
+        )
+        self.xy_view.cursorMoved.connect(lambda x, y: self._update_status('XY', x, y))
+        self.xz_view.cursorMoved.connect(lambda x, y: self._update_status('XZ', x, y))
+        self.yz_view.cursorMoved.connect(lambda x, y: self._update_status('YZ', x, y))
+
+        # Keyboard shortcuts.
+        def sc(seq, fn):
+            s = QtWidgets.QShortcut(QtGui.QKeySequence(seq), self)
+            s.setContext(QtCore.Qt.ApplicationShortcut)
+            s.activated.connect(fn)
+            return s
+
+        # F11 is wired via a QAction on the toolbar — QShortcut on a QDialog
+        # is sometimes swallowed by the window manager.
+        sc("R", self._reset_active_view)
+        sc("PgDown", lambda: self._step_z(+1))
+        sc("PgUp", lambda: self._step_z(-1))
+        sc("Shift+PgDown", lambda: self._step_z(+10))
+        sc("Shift+PgUp", lambda: self._step_z(-10))
+        sc("Home", lambda: self._jump_z(0))
+        sc("End", lambda: self._jump_z(10**9))  # clamped by spinbox max
+
+        # Map pane key -> container widget (populated here now that _build_ui
+        # has already run _build_quad_view).
+        self._quad_panes = {
+            'xy': self.xy_container,
+            'xz': self.xz_container,
+            'yz': self.yz_container,
+            '3d': self.view_3d_container,
+        }
+        self._quad_maximized = None
+        # Restore buttons start disabled (no pane is maxed on startup).
+        for btn in getattr(self, "_pane_restore_buttons", {}).values():
+            btn.setEnabled(False)
+
+    def _dual_plane(self, which):
+        combo = self.dual_view1_plane_combo if which == 1 else self.dual_view2_plane_combo
+        idx = combo.currentIndex()
+        return ('XY', 'XZ', 'YZ')[idx]
+
+    def _update_status(self, plane, h, v):
+        """Format and show cursor world coord + pixel value in the status bar."""
+        if self.multires_image is None:
+            return
+        shape0 = self.multires_image.get_level_shape(0)
+        if shape0 is None or len(shape0) < 3:
+            return
+        zs, ys, xs = shape0[-3:]
+        hi, vi = int(round(h)), int(round(v))
+        if plane == 'XY':
+            x, y, z = hi, vi, self.z_pos
+        elif plane == 'XZ':
+            x, z, y = hi, vi, self.y_pos
+        elif plane == 'YZ':
+            y, z, x = hi, vi, self.x_pos
+        else:
+            return
+        in_bounds = (0 <= z < zs) and (0 <= y < ys) and (0 <= x < xs)
+        if not in_bounds:
+            self.status_label.setText(
+                f"[{plane}] out of bounds (z={z}  y={y}  x={x})"
+            )
+            return
+        self.status_label.setText(
+            f"[{plane}] z={z:5d}  y={y:5d}  x={x:5d}   "
+            f"(volume: {zs}×{ys}×{xs})"
+        )
+
+    def _active_view(self):
+        """Return the DynamicImageView currently visible, best-effort."""
+        idx = self.stack.currentIndex()
+        if idx == 0:
+            return self.single_image_view
+        if idx == 1:
+            return self.dual_view1
+        if idx == 2:
+            # Prefer whichever ortho pane currently has focus.
+            for v in (self.xy_view, self.xz_view, self.yz_view):
+                if v.hasFocus():
+                    return v
+            return self.xy_view
+        return None
+
+    def _reset_active_view(self):
+        v = self._active_view()
+        if v is not None and v.image is not None:
+            v.view.autoRange(padding=0)
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+            if hasattr(self, "_fullscreen_btn"):
+                self._fullscreen_btn.setText("⛶ Fullscreen")
+        else:
+            self.showFullScreen()
+            if hasattr(self, "_fullscreen_btn"):
+                self._fullscreen_btn.setText("⤢ Exit Fullscreen")
+
+    def _step_z(self, delta):
+        if hasattr(self, 'z_spin') and self.z_spin.isEnabled():
+            self.z_spin.setValue(self.z_spin.value() + delta)
+        if hasattr(self, 'single_slice_slider') and self.single_slice_slider.isEnabled():
+            self.single_slice_slider.setValue(
+                self.single_slice_slider.value() + delta
+            )
+
+    def _jump_z(self, value):
+        if hasattr(self, 'z_spin') and self.z_spin.isEnabled():
+            self.z_spin.setValue(value)
+        if hasattr(self, 'single_slice_slider') and self.single_slice_slider.isEnabled():
+            self.single_slice_slider.setValue(value)
+
+    _PANE_SIDE = {'xy': 'left', 'yz': 'left', 'xz': 'right', '3d': 'right'}
+
+    _PANE_BTN_STYLE = """
+        QToolButton {
+            background: #4a4a4a;
+            color: #f0f0f0;
+            border: 1px solid #777;
+            border-radius: 3px;
+            font-size: 13px;
+            padding: 0px;
+        }
+        QToolButton:hover   { background: #5c5c5c; border-color: #aaa; }
+        QToolButton:pressed { background: #3a3a3a; }
+        QToolButton:disabled {
+            background: #2e2e2e;
+            color: #666;
+            border-color: #444;
+        }
+    """
+
+    def _build_pane_header(self, key, label):
+        """Header row for a quad-view pane: title label + max/restore buttons.
+
+        Buttons sit top-right at an easily clickable size with explicit chrome
+        so they're visible against the dark pane header. Restore starts
+        disabled and becomes enabled once a pane is maximized.
+        """
+        label.setStyleSheet("padding: 3px; font-weight: bold; color: #e8e8e8;")
+        label.setAlignment(QtCore.Qt.AlignCenter)
+
+        def _mk_btn(glyph, tip, slot, start_enabled=True):
+            btn = QtWidgets.QToolButton()
+            btn.setText(glyph)
+            btn.setToolTip(tip)
+            btn.setFixedSize(QtCore.QSize(26, 22))
+            btn.setStyleSheet(self._PANE_BTN_STYLE)
+            btn.setEnabled(start_enabled)
+            btn.clicked.connect(slot)
+            return btn
+
+        max_btn = _mk_btn(
+            "⛶", "Maximize this pane",
+            lambda _=False, k=key: self._maximize_pane(k),
+        )
+        restore_btn = _mk_btn(
+            "⧉", "Restore 4-pane view",
+            lambda _=False: self._restore_panes(),
+            start_enabled=False,
+        )
+
+        if not hasattr(self, "_pane_restore_buttons"):
+            self._pane_restore_buttons = {}
+        self._pane_restore_buttons[key] = restore_btn
+
+        header = QtWidgets.QWidget()
+        header.setStyleSheet("background-color: #2a2a2a;")
+        row = QtWidgets.QHBoxLayout(header)
+        row.setContentsMargins(6, 2, 6, 2)
+        row.setSpacing(4)
+        row.addStretch(1)
+        row.addWidget(label)
+        row.addStretch(1)
+        row.addWidget(max_btn)
+        row.addWidget(restore_btn)
+        return header
+
+    def _set_restore_buttons_enabled(self, enabled):
+        for btn in getattr(self, "_pane_restore_buttons", {}).values():
+            btn.setEnabled(enabled)
+
+    def _maximize_pane(self, key):
+        """Expand `key`'s pane to fill the quad-view area."""
+        if key not in self._quad_panes:
+            return
+        side = self._PANE_SIDE[key]
+        for k, pane in self._quad_panes.items():
+            pane.setVisible(k == key)
+        # Hide the opposite splitter so the maxed pane actually gets the
+        # window (hiding a splitter child only expands its sibling, not the
+        # splitter itself).
+        self._left_splitter.setVisible(side == 'left')
+        self._right_splitter.setVisible(side == 'right')
+        self._quad_maximized = key
+        self._set_restore_buttons_enabled(True)
+
+    def _restore_panes(self):
+        """Return to the 4-pane layout."""
+        if self._quad_maximized is None:
+            return
+        for pane in self._quad_panes.values():
+            pane.show()
+        self._left_splitter.show()
+        self._right_splitter.show()
+        self._left_splitter.setSizes([1, 1])
+        self._right_splitter.setSizes([1, 1])
+        self._main_splitter.setSizes([1, 1])
+        self._quad_maximized = None
+        self._set_restore_buttons_enabled(False)
+
+    # Keep the old shortcut-compatible name as a toggle alias.
+    def _toggle_pane_max(self, key):
+        if self._quad_maximized == key:
+            self._restore_panes()
+        else:
+            self._maximize_pane(key)
     
     def _build_toolbar(self):
         """Build info toolbar"""
@@ -138,12 +361,33 @@ class UnifiedZarrViewer(QtWidgets.QDialog):
         self.cache_stats_label = QtWidgets.QLabel("Cache: N/A")
         self.cache_stats_label.setStyleSheet("font-size: 11px; color: #4a4; padding: 3px;")
         layout.addWidget(self.cache_stats_label)
-        
+
         # Update cache stats every 2 seconds
         self.cache_stats_timer = QtCore.QTimer()
         self.cache_stats_timer.timeout.connect(self._update_cache_stats)
         self.cache_stats_timer.start(2000)
-        
+
+        # Fullscreen toggle. Visible button + QAction (which also wires F11
+        # reliably — QShortcut on a QDialog sometimes doesn't receive F11).
+        self._fullscreen_btn = QtWidgets.QToolButton()
+        self._fullscreen_btn.setText("⛶ Fullscreen")
+        self._fullscreen_btn.setToolTip("Toggle full screen (F11)")
+        self._fullscreen_btn.setStyleSheet(
+            "QToolButton { background:#4a4a4a; color:#f0f0f0; "
+            "border:1px solid #777; border-radius:3px; padding:2px 10px; "
+            "font-size:11px; }"
+            "QToolButton:hover { background:#5c5c5c; }"
+            "QToolButton:pressed { background:#3a3a3a; }"
+        )
+        self._fullscreen_btn.clicked.connect(self._toggle_fullscreen)
+        layout.addWidget(self._fullscreen_btn)
+
+        self._fullscreen_action = QtWidgets.QAction("Toggle fullscreen", self)
+        self._fullscreen_action.setShortcut(QtGui.QKeySequence("F11"))
+        self._fullscreen_action.setShortcutContext(QtCore.Qt.ApplicationShortcut)
+        self._fullscreen_action.triggered.connect(self._toggle_fullscreen)
+        self.addAction(self._fullscreen_action)
+
         return toolbar
     
     def _update_cache_stats(self):
@@ -488,96 +732,86 @@ class UnifiedZarrViewer(QtWidgets.QDialog):
         """Build quad (4-view orthogonal) view mode interface with resizable splitters"""
         widget = QtWidgets.QWidget()
         main_layout = QtWidgets.QHBoxLayout(widget)
+
+        self._main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        main_splitter = self._main_splitter
+
+        self._left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        left_splitter = self._left_splitter
         
-        # Main vertical splitter for left/right
-        main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
-        
-        # Left side - vertical splitter for XY and YZ
-        left_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        
-        # XY view with label
-        xy_container = QtWidgets.QWidget()
-        xy_layout = QtWidgets.QVBoxLayout(xy_container)
+        # XY view with header (label + max/restore buttons)
+        self.xy_container = QtWidgets.QWidget()
+        xy_layout = QtWidgets.QVBoxLayout(self.xy_container)
         xy_layout.setContentsMargins(0, 0, 0, 0)
         xy_layout.setSpacing(2)
-        
-        xy_label = QtWidgets.QLabel("XY (Axial)")
-        xy_label.setStyleSheet("background-color: #2a2a2a; padding: 3px; font-weight: bold;")
-        xy_label.setAlignment(QtCore.Qt.AlignCenter)
-        xy_layout.addWidget(xy_label)
-        
+        self.xy_label = QtWidgets.QLabel("XY (Axial)")
+        xy_layout.addWidget(self._build_pane_header('xy', self.xy_label))
         self.xy_view = OrthoImageView('XY')
         self.xy_view.ui.roiBtn.hide()
         self.xy_view.ui.menuBtn.hide()
         self.xy_view.crosshairMoved.connect(self._on_xy_crosshair_moved)
         xy_layout.addWidget(self.xy_view)
-        
-        # YZ view with label
-        yz_container = QtWidgets.QWidget()
-        yz_layout = QtWidgets.QVBoxLayout(yz_container)
+
+        # YZ view
+        self.yz_container = QtWidgets.QWidget()
+        yz_layout = QtWidgets.QVBoxLayout(self.yz_container)
         yz_layout.setContentsMargins(0, 0, 0, 0)
         yz_layout.setSpacing(2)
-        
-        yz_label = QtWidgets.QLabel("YZ (Sagittal)")
-        yz_label.setStyleSheet("background-color: #2a2a2a; padding: 3px; font-weight: bold;")
-        yz_label.setAlignment(QtCore.Qt.AlignCenter)
-        yz_layout.addWidget(yz_label)
-        
+        self.yz_label = QtWidgets.QLabel("YZ (Sagittal)")
+        yz_layout.addWidget(self._build_pane_header('yz', self.yz_label))
         self.yz_view = OrthoImageView('YZ')
         self.yz_view.ui.roiBtn.hide()
         self.yz_view.ui.menuBtn.hide()
         self.yz_view.crosshairMoved.connect(self._on_yz_crosshair_moved)
         yz_layout.addWidget(self.yz_view)
-        
-        left_splitter.addWidget(xy_container)
-        left_splitter.addWidget(yz_container)
+
+        left_splitter.addWidget(self.xy_container)
+        left_splitter.addWidget(self.yz_container)
         left_splitter.setStretchFactor(0, 1)
         left_splitter.setStretchFactor(1, 1)
+        # Give splitters explicit equal initial sizes — setStretchFactor alone
+        # only controls resize distribution, so the initial layout picks up
+        # size hints and the panes end up unequal.
+        left_splitter.setSizes([1, 1])
         
-        # Right side - vertical splitter for XZ and 3D
-        right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self._right_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        right_splitter = self._right_splitter
         
-        # XZ view with label
-        xz_container = QtWidgets.QWidget()
-        xz_layout = QtWidgets.QVBoxLayout(xz_container)
+        # XZ view
+        self.xz_container = QtWidgets.QWidget()
+        xz_layout = QtWidgets.QVBoxLayout(self.xz_container)
         xz_layout.setContentsMargins(0, 0, 0, 0)
         xz_layout.setSpacing(2)
-        
-        xz_label = QtWidgets.QLabel("XZ (Coronal)")
-        xz_label.setStyleSheet("background-color: #2a2a2a; padding: 3px; font-weight: bold;")
-        xz_label.setAlignment(QtCore.Qt.AlignCenter)
-        xz_layout.addWidget(xz_label)
-        
+        self.xz_label = QtWidgets.QLabel("XZ (Coronal)")
+        xz_layout.addWidget(self._build_pane_header('xz', self.xz_label))
         self.xz_view = OrthoImageView('XZ')
         self.xz_view.ui.roiBtn.hide()
         self.xz_view.ui.menuBtn.hide()
         self.xz_view.crosshairMoved.connect(self._on_xz_crosshair_moved)
         xz_layout.addWidget(self.xz_view)
-        
-        # 3D view with label
-        view_3d_container = QtWidgets.QWidget()
-        view_3d_layout = QtWidgets.QVBoxLayout(view_3d_container)
+
+        # 3D view
+        self.view_3d_container = QtWidgets.QWidget()
+        view_3d_layout = QtWidgets.QVBoxLayout(self.view_3d_container)
         view_3d_layout.setContentsMargins(0, 0, 0, 0)
         view_3d_layout.setSpacing(2)
-        
-        view_3d_label = QtWidgets.QLabel("3D Volume (VisPy)")
-        view_3d_label.setStyleSheet("background-color: #2a2a2a; padding: 3px; font-weight: bold;")
-        view_3d_label.setAlignment(QtCore.Qt.AlignCenter)
-        view_3d_layout.addWidget(view_3d_label)
-        
+        self.view_3d_label = QtWidgets.QLabel("3D Volume (disabled)")
+        view_3d_layout.addWidget(self._build_pane_header('3d', self.view_3d_label))
         self.view_3d = VisPy3DView()
         view_3d_layout.addWidget(self.view_3d)
-        
-        right_splitter.addWidget(xz_container)
-        right_splitter.addWidget(view_3d_container)
+
+        right_splitter.addWidget(self.xz_container)
+        right_splitter.addWidget(self.view_3d_container)
         right_splitter.setStretchFactor(0, 1)
         right_splitter.setStretchFactor(1, 1)
-        
+        right_splitter.setSizes([1, 1])
+
         # Add left and right to main splitter
         main_splitter.addWidget(left_splitter)
         main_splitter.addWidget(right_splitter)
         main_splitter.setStretchFactor(0, 1)
         main_splitter.setStretchFactor(1, 1)
+        main_splitter.setSizes([1, 1])
         
         main_layout.addWidget(main_splitter, stretch=4)
         
@@ -1519,7 +1753,7 @@ def main():
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
     
-    app.setApplicationName("ZVIEW - OPTIMIZED")
+    app.setApplicationName("ZVIEW")
     apply_dark_theme(app)
     
     viewer = UnifiedZarrViewer()
