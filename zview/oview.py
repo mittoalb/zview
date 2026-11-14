@@ -4,9 +4,11 @@ import traceback
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtCore, QtGui
+from PyQt5 import QtCore
 
+from zview import _log
 from zview.sview import DynamicImageView
+from zview.theme import AXIS_PLANE, PLANE_COLORS
 
 
 # Per-axis geometry: (vertical world axis index, horizontal world axis index,
@@ -25,11 +27,17 @@ _SEL_AXES = {
     'YZ': (-3, -2),
 }
 
+AXIS_LETTERS = ('z', 'y', 'x')
+
 
 class OrthoImageView(DynamicImageView):
     """A single ortho pane: XY, XZ, or YZ, with crosshair, click-to-move-slice,
     and the same chunk-aligned lazy loading as sview."""
 
+    # Left click picked a voxel: full (z, y, x) in level-0 coords. The pane's
+    # fixed axis keeps its current value.
+    positionPicked = QtCore.pyqtSignal(int, int, int)
+    # Legacy: (h, v) world ints of the click, in this pane's on-screen axes.
     crosshairMoved = QtCore.pyqtSignal(int, int)
 
     def __init__(self, axis_name, *args, **kwargs):
@@ -38,13 +46,15 @@ class OrthoImageView(DynamicImageView):
             raise ValueError(f"axis_name must be XY/XZ/YZ, got {axis_name!r}")
         self.axis_name = axis_name
         self.slice_indices = [0, 0, 0]  # [z, y, x] in level-0 coords
+        # Draw voxels with their physical proportions (from OME-NGFF scale).
+        self.physical_aspect = True
 
-        self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen('y', width=1))
-        self.hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen('y', width=1))
+        self.vLine = pg.InfiniteLine(angle=90, movable=False)
+        self.hLine = pg.InfiniteLine(angle=0, movable=False)
         self.addItem(self.vLine, ignoreBounds=True)
         self.addItem(self.hLine, ignoreBounds=True)
+        self._apply_crosshair_pens()
 
-        self.scene.sigMouseMoved.connect(self._on_mouse_moved)
         self.scene.sigMouseClicked.connect(self._on_mouse_clicked)
 
         self.view.setMouseEnabled(x=True, y=True)
@@ -56,8 +66,21 @@ class OrthoImageView(DynamicImageView):
     def _axes(self):
         return _AXIS_GEOM[self.axis_name]
 
+    @property
+    def fixed_axis(self):
+        """Index into (z, y, x) of the axis this pane slices through."""
+        return self._axes()[2]
+
+    @property
+    def h_axis(self):
+        return self._axes()[1]
+
+    @property
+    def v_axis(self):
+        return self._axes()[0]
+
     def _fixed_slice_from_indices(self):
-        return self.slice_indices[self._axes()[2]]
+        return self.slice_indices[self.fixed_axis]
 
     def _downsample(self, lvl_shape, level0_shape):
         """(downsample_x_world, downsample_y_world) for this pane and level."""
@@ -75,9 +98,30 @@ class OrthoImageView(DynamicImageView):
         v, h, _ = self._axes()
         return level0_shape[h], level0_shape[v]
 
+    def _apply_aspect(self):
+        """Lock the view so one voxel has its physical h:v proportions.
+
+        pyqtgraph's ratio is (screen size of an x unit) / (of a y unit), i.e.
+        voxel_h / voxel_v. Clamped so broken metadata can't flatten the pane.
+        """
+        ratio = 1.0
+        if self.physical_aspect and self.multires_image is not None:
+            vs = self.multires_image.voxel_size()
+            sh, sv = vs[self.h_axis], vs[self.v_axis]
+            if sh > 0 and sv > 0:
+                ratio = min(20.0, max(0.05, sh / sv))
+        self.view.setAspectLocked(True, ratio=ratio)
+
+    def set_physical_aspect(self, on):
+        self.physical_aspect = bool(on)
+        self._apply_aspect()
+        if self.image is not None:
+            self.view.autoRange(padding=0)
+
     # ---------- public ----------
 
-    def set_multires_image(self, multires_image):
+    def set_multires_image(self, multires_image, slice_indices=None):
+        self._cancel_pending()
         self.multires_image = multires_image
         self._last_load_params = None
 
@@ -85,71 +129,117 @@ class OrthoImageView(DynamicImageView):
         self.current_level = initial_level
 
         level0_shape = self.multires_image.get_level_shape(0)
-        if level0_shape and len(level0_shape) >= 3:
+        if slice_indices is not None:
+            self.slice_indices = [int(i) for i in slice_indices]
+        elif level0_shape:
             self.slice_indices = [int(level0_shape[i] // 2) for i in range(3)]
-            self.current_slice = self._fixed_slice_from_indices()
+        self.current_slice = self._fixed_slice_from_indices()
 
-        # Only load the coarsest frame; let user interaction trigger finer
-        # reloads. Immediate full-level reload here is the dominant cause of
-        # startup stalls on large volumes.
-        self._show_initial_frame(initial_level)
+        self._apply_aspect()
+        # Show the coarsest plane synchronously (instant feedback), then
+        # refine to the screen-matched level in the background. Refining used
+        # to be skipped because it blocked the GUI thread at startup; region
+        # fetches are asynchronous now.
+        self._show_initial_frame(initial_level, auto_levels=True)
         self._initial_load_done = True
+        self._sync_crosshair()
+        lvl_shape = self.multires_image.get_level_shape(initial_level)
+        if lvl_shape is not None:
+            self.levelChanged.emit(initial_level, tuple(lvl_shape))
+        self.schedule_refine()
 
-    def set_slice_indices(self, z, y, x):
-        if self.slice_indices == [z, y, x]:
+    def set_axis(self, axis_name):
+        """Switch this pane to another plane, keeping levels/LUT, fitting view."""
+        if axis_name not in _AXIS_GEOM:
+            raise ValueError(f"axis_name must be XY/XZ/YZ, got {axis_name!r}")
+        if axis_name == self.axis_name:
             return
-        self.slice_indices = [z, y, x]
+        self.axis_name = axis_name
         self.current_slice = self._fixed_slice_from_indices()
         self._last_load_params = None
-        self._reload_visible_region()
+        self._cancel_pending()
+        self._apply_crosshair_pens()
+        if self.multires_image is None:
+            return
+        self._apply_aspect()
+        # Restart from the coarsest level: the old view rect is in the old
+        # plane's coordinates and would select a wrong region/level.
+        coarsest = len(self.multires_image.levels) - 1
+        self._initial_load_done = False
+        self.current_level = coarsest
+        self._show_initial_frame(coarsest, auto_levels=False)
+        self._initial_load_done = True
+        self._sync_crosshair()
+        lvl_shape = self.multires_image.get_level_shape(coarsest)
+        if lvl_shape is not None:
+            self.levelChanged.emit(coarsest, tuple(lvl_shape))
+        self.schedule_refine()
+
+    def set_slice_indices(self, z, y, x):
+        new = [int(z), int(y), int(x)]
+        if self.slice_indices == new:
+            return
+        old_fixed = self._fixed_slice_from_indices()
+        self.slice_indices = new
+        self.current_slice = self._fixed_slice_from_indices()
+        self._sync_crosshair()
+        # Moving the crosshair within the plane doesn't change the image.
+        if self.current_slice != old_fixed:
+            self._last_load_params = None
+            self._reload_visible_region()
+
+    def set_crosshair_visible(self, visible):
+        self.vLine.setVisible(visible)
+        self.hLine.setVisible(visible)
+
+    def _apply_crosshair_pens(self):
+        """Colour each line by the plane it marks: in XY, the vertical line
+        (x = const) is the YZ plane and the horizontal one the XZ plane."""
+        for line, ax in ((self.vLine, self.h_axis), (self.hLine, self.v_axis)):
+            r, g, b = (int(c * 255) for c in PLANE_COLORS[AXIS_PLANE[ax]])
+            line.setPen(pg.mkPen((r, g, b, 210), width=1))
+
+    def _sync_crosshair(self):
+        # +0.5: voxel i spans [i, i+1) in world space; mark its centre.
+        self.vLine.setPos(self.slice_indices[self.h_axis] + 0.5)
+        self.hLine.setPos(self.slice_indices[self.v_axis] + 0.5)
 
     def update_crosshair(self, pos_x, pos_y):
+        """Legacy API: place the crosshair at explicit pane coords."""
         self.vLine.setPos(pos_x)
         self.hLine.setPos(pos_y)
 
     # ---------- mouse ----------
 
-    def _on_mouse_moved(self, scene_pos):
-        if self.image is None:
-            return
-        p = self.view.mapSceneToView(scene_pos)
-        self.vLine.setPos(p.x())
-        self.hLine.setPos(p.y())
-
     def _on_mouse_clicked(self, event):
         if self.image is None or self.multires_image is None:
             return
+        if event.button() != QtCore.Qt.LeftButton or event.double():
+            return
         level0_shape = self.multires_image.get_level_shape(0)
-        if level0_shape is None or len(level0_shape) < 3:
+        if level0_shape is None:
             return
         p = self.view.mapSceneToView(event.scenePos())
         # Clamp to world (level-0) extent, not current-level pixel extent —
         # at coarse levels that collapses the clamp range.
         x_max, y_max = self._world_bounds_xy(level0_shape)
-        x = max(0, min(int(p.x()), x_max - 1))
-        y = max(0, min(int(p.y()), y_max - 1))
-        self.crosshairMoved.emit(x, y)
+        h = max(0, min(int(np.floor(p.x())), x_max - 1))
+        v = max(0, min(int(np.floor(p.y())), y_max - 1))
+        idx = list(self.slice_indices)
+        idx[self.h_axis] = h
+        idx[self.v_axis] = v
+        self.crosshairMoved.emit(h, v)
+        self.positionPicked.emit(*idx)
 
     # ---------- rendering ----------
 
-    def _set_image_with_transform(self, img, pos_x, pos_y, ds_x, ds_y, auto):
-        tr = QtGui.QTransform()
-        tr.translate(float(pos_x), float(pos_y))
-        tr.scale(float(ds_x), float(ds_y))
-        self.setImage(
-            self._prepare_for_display(img),
-            autoLevels=auto,
-            autoRange=auto,
-            transform=tr,
-        )
-
-    def _show_initial_frame(self, level):
+    def _show_initial_frame(self, level, auto_levels=True):
         lvl_shape = self.multires_image.get_level_shape(level)
-        if lvl_shape is None or len(lvl_shape) < 3:
+        if lvl_shape is None:
             return
         level0_shape = self.multires_image.get_level_shape(0)
 
-        _, _, fixed = self._axes()
+        fixed = self.fixed_axis
         axis_size_0 = level0_shape[fixed]
         axis_size_L = lvl_shape[fixed]
         slice_scale = axis_size_0 / axis_size_L if axis_size_L > 0 else 1.0
@@ -164,7 +254,10 @@ class OrthoImageView(DynamicImageView):
 
         ds_x, ds_y = self._downsample(lvl_shape, level0_shape)
         pos_x, pos_y = self._world_offset_xy(level)
-        self._set_image_with_transform(img, pos_x, pos_y, ds_x, ds_y, auto=True)
+        self._last_load_params = None
+        self._set_image_with_transform(
+            img, pos_x, pos_y, ds_x, ds_y, auto_levels=auto_levels, auto_range=True,
+        )
 
     def _reload_visible_region(self):
         if self.multires_image is None:
@@ -189,7 +282,6 @@ class OrthoImageView(DynamicImageView):
             width_L = curr_shape[h_ax]
             height_L = curr_shape[v_ax]
 
-            # Fixed-slice index at this level.
             axis_size_L = curr_shape[fixed_ax]
             axis_size_0 = level0_shape[fixed_ax]
             slice_scale = axis_size_0 / axis_size_L if axis_size_L > 0 else 1.0
@@ -198,7 +290,6 @@ class OrthoImageView(DynamicImageView):
                 0, max(0, axis_size_L - 1),
             ))
 
-            # View bounds -> level pixel indices, minus translation.
             vx0 = int(np.floor((view_box.left() - pos_x_off) / ds_x))
             vy0 = int(np.floor((view_box.top() - pos_y_off) / ds_y))
             vx1 = int(np.ceil((view_box.right() - pos_x_off) / ds_x))
@@ -218,29 +309,33 @@ class OrthoImageView(DynamicImageView):
             load_params = (optimal_level, slice_idx_L, vy0, vy1, vx0, vx1, step, self.axis_name)
             if load_params == self._last_load_params:
                 return
-            level_changed = (optimal_level != self.current_level)
             self._last_load_params = load_params
-            self.current_level = optimal_level
 
-            chunk = self.multires_image.get_slice_2d_region(
-                optimal_level, self.axis_name.lower(), slice_idx_L,
-                (vy0, vy1), (vx0, vx1),
-            )
-            if chunk is None or chunk.size == 0:
-                return
-            if step > 1:
-                chunk = chunk[::step, ::step]
+            mi = self.multires_image
+            axis = self.axis_name
 
-            x0_world = vx0 * ds_x + pos_x_off
-            y0_world = vy0 * ds_y + pos_y_off
-            self._set_image_with_transform(
-                chunk, x0_world, y0_world, ds_x * step, ds_y * step, auto=False,
-            )
+            def fetch():
+                chunk = mi.get_slice_2d_region(
+                    optimal_level, axis.lower(), slice_idx_L, (vy0, vy1), (vx0, vx1),
+                )
+                if chunk is not None and step > 1:
+                    chunk = chunk[::step, ::step]
+                return chunk
 
-            if level_changed:
-                print(f"[{self.axis_name}] level -> {optimal_level}, shape {curr_shape}")
-                self.levelChanged.emit(optimal_level, tuple(curr_shape))
+            def apply(chunk):
+                if chunk is None or chunk.size == 0 or axis != self.axis_name:
+                    return
+                level_changed = optimal_level != self.current_level
+                self.current_level = optimal_level
+                self._set_image_with_transform(
+                    chunk, vx0 * ds_x + pos_x_off, vy0 * ds_y + pos_y_off,
+                    ds_x * step, ds_y * step,
+                )
+                if level_changed:
+                    self.levelChanged.emit(optimal_level, tuple(curr_shape))
+
+            self._submit_fetch(fetch, apply)
 
         except Exception as e:
-            print(f"[{self.axis_name}] reload error: {e}")
+            _log.error(f"[{self.axis_name}] reload error: {e}")
             traceback.print_exc()

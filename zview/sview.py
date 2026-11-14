@@ -1,10 +1,23 @@
 """Dynamic chunk-aligned image view with lazy per-level loading."""
 
+# Bind PyOpenGL to the same GL libraries as Qt before pyqtgraph imports it.
+from zview.sysinfo import apply_gl_compat as _apply_gl_compat
+_apply_gl_compat()
+
+import math
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui
+
+from zview import _log
+
+# dtypes pyqtgraph renders natively (with levels + LUT); anything else is
+# converted to float32 once per frame.
+_NATIVE_DTYPES = {np.dtype(t) for t in (np.uint8, np.uint16, np.int8, np.int16,
+                                        np.float32, np.float64)}
 
 
 class DynamicImageView(pg.ImageView):
@@ -13,7 +26,14 @@ class DynamicImageView(pg.ImageView):
     level transitions."""
 
     levelChanged = QtCore.pyqtSignal(int, tuple)
-    cursorMoved = QtCore.pyqtSignal(float, float)  # world coords
+    # World coords (h, v) under the cursor and the displayed pixel value
+    # there (NaN when outside the image).
+    cursorMoved = QtCore.pyqtSignal(float, float, float)
+    # Ctrl+wheel over the pane: request a slice step of +/-1.
+    sliceStepRequested = QtCore.pyqtSignal(int)
+
+    # Internal: worker thread -> GUI thread hand-off of fetched pixels.
+    _fetched = QtCore.pyqtSignal(int, object)
 
     _RELOAD_DEBOUNCE_MS = 100
 
@@ -34,31 +54,121 @@ class DynamicImageView(pg.ImageView):
         if getattr(self, "imageItem", None) is not None:
             self.imageItem.setAutoDownsample(True)
 
-        # Report cursor position (world coords) for the status bar.
         self.scene.sigMouseMoved.connect(self._emit_cursor_moved)
+        self.ui.graphicsView.viewport().installEventFilter(self)
+
+        # Region fetches run off the GUI thread so panning/slicing never
+        # blocks on I/O. One worker per pane keeps requests ordered; stale
+        # requests are skipped by generation number.
+        self._loader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zview-pane")
+        self._req_gen = 0
+        self.has_refined = False   # a region fetch has been shown since attach
+        self._fetched.connect(self._on_fetched)
+
+    # ------------------------------------------------------------ async fetch
+
+    def _submit_fetch(self, fetch, apply):
+        """Run `fetch()` on the pane's worker; call `apply(result)` on the GUI
+        thread if no newer request has been made in the meantime."""
+        self._req_gen += 1
+        gen = self._req_gen
+
+        def work():
+            if gen != self._req_gen:
+                return  # superseded before it started
+            try:
+                res = fetch()
+            except Exception as e:  # surfaced on the GUI thread
+                res = e
+            self._fetched.emit(gen, (res, apply))
+
+        self._loader.submit(work)
+
+    def _cancel_pending(self):
+        self._req_gen += 1
+        self.has_refined = False
+
+    def _on_fetched(self, gen, payload):
+        if gen != self._req_gen:
+            return
+        res, apply = payload
+        if isinstance(res, Exception):
+            _log.error(f"[{type(self).__name__}] fetch error: {res}")
+            self._last_load_params = None
+            return
+        try:
+            apply(res)
+            self.has_refined = True
+        except Exception as e:
+            _log.error(f"[{type(self).__name__}] apply error: {e}")
+            traceback.print_exc()
+
+    def schedule_refine(self, delay_ms=None):
+        """Reload the visible region at the right level after `delay_ms`."""
+        if self.multires_image is not None:
+            self._reload_timer.start(self._RELOAD_DEBOUNCE_MS if delay_ms is None else delay_ms)
+
+    # ------------------------------------------------------------ events
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QtCore.QEvent.Wheel
+                and event.modifiers() & QtCore.Qt.ControlModifier):
+            delta = event.angleDelta().y()
+            if delta:
+                self.sliceStepRequested.emit(1 if delta > 0 else -1)
+            return True
+        return super().eventFilter(obj, event)
+
+    def pixel_value_at(self, scene_pos):
+        """Displayed value under `scene_pos`, or NaN."""
+        data = self._current_display_data
+        if data is None or data.ndim != 2 or self.imageItem is None:
+            return math.nan
+        p = self.imageItem.mapFromScene(scene_pos)
+        col, row = int(math.floor(p.x())), int(math.floor(p.y()))
+        if 0 <= row < data.shape[0] and 0 <= col < data.shape[1]:
+            try:
+                return float(data[row, col])
+            except (TypeError, ValueError):
+                return math.nan
+        return math.nan
 
     def _emit_cursor_moved(self, scene_pos):
         if self.image is None:
             return
         p = self.view.mapSceneToView(scene_pos)
-        self.cursorMoved.emit(float(p.x()), float(p.y()))
+        self.cursorMoved.emit(float(p.x()), float(p.y()), self.pixel_value_at(scene_pos))
+
+    # ------------------------------------------------------------ public
 
     def set_multires_image(self, multires_image):
         """Attach a MultiResolutionImage and display the coarsest level."""
+        self._cancel_pending()
         self.multires_image = multires_image
         self._last_load_params = None
         self._initial_load_done = False
 
         level0_shape = self.multires_image.get_level_shape(0)
-        if level0_shape is None or len(level0_shape) < 3:
-            self.current_slice = 0
-        else:
-            self.current_slice = int(level0_shape[0] // 2)
+        self.current_slice = int(level0_shape[0] // 2) if level0_shape else 0
 
         initial_level = len(self.multires_image.levels) - 1
         self.current_level = initial_level
         self._show_initial_frame(initial_level)
         self._initial_load_done = True
+        lvl_shape = self.multires_image.get_level_shape(initial_level)
+        if lvl_shape is not None:
+            self.levelChanged.emit(initial_level, tuple(lvl_shape))
+        self.schedule_refine()
+
+    def detach(self):
+        """Drop the dataset and blank the pane (e.g. on File > Close)."""
+        self._reload_timer.stop()
+        self._cancel_pending()
+        self.multires_image = None
+        self._last_load_params = None
+        self._initial_load_done = False
+        self._current_display_data = None
+        self.clear()
 
     def set_slice(self, slice_idx_level0: int):
         """Set slice index in level-0 coordinates and reload."""
@@ -74,16 +184,30 @@ class DynamicImageView(pg.ImageView):
     def _prepare_for_display(image):
         if image is None or image.size == 0:
             return image
-        if image.dtype != np.float32:
-            image = image.astype(np.float32, copy=False)
-        return image
+        if image.dtype in _NATIVE_DTYPES:
+            return image
+        return image.astype(np.float32, copy=False)
+
+    def _set_image_with_transform(self, img, pos_x, pos_y, ds_x, ds_y,
+                                  auto_levels=False, auto_range=False):
+        """Show `img` with level pixel (i, j) -> world (pos_x + i*ds_x, pos_y + j*ds_y).
+
+        Translate-then-scale: pyqtgraph's setImage(pos=, scale=) applies these
+        in the opposite order and misplaces the image, so we build the
+        transform ourselves.
+        """
+        display = self._prepare_for_display(img)
+        self._current_display_data = display
+        tr = QtGui.QTransform()
+        tr.translate(float(pos_x), float(pos_y))
+        tr.scale(float(ds_x), float(ds_y))
+        self.setImage(display, autoLevels=auto_levels, autoRange=auto_range, transform=tr)
 
     def _show_initial_frame(self, level):
         """Load and display the full coarsest-level plane as the opening view."""
         lvl_shape = self.multires_image.get_level_shape(level)
-        if lvl_shape is None or len(lvl_shape) < 3:
+        if lvl_shape is None:
             return
-
         level0_shape = self.multires_image.get_level_shape(0)
         scale_z = level0_shape[0] / lvl_shape[0] if lvl_shape[0] > 0 else 1.0
         z_idx_L = int(np.clip(self.current_slice / scale_z, 0, lvl_shape[0] - 1))
@@ -92,24 +216,15 @@ class DynamicImageView(pg.ImageView):
             level, z_idx_L, (0, lvl_shape[1]), (0, lvl_shape[2])
         )
         if img is None:
-            print(f"[sview] failed to load initial frame at level {level}")
+            _log.error(f"[sview] failed to load initial frame at level {level}")
             return
 
-        display_img = self._prepare_for_display(img)
-        self._current_display_data = display_img
-
-        downsample_y = level0_shape[-2] / lvl_shape[-2]
-        downsample_x = level0_shape[-1] / lvl_shape[-1]
         _, y_off, x_off = self.multires_image.get_world_offset(level)
-
-        # Translate-then-scale: level pixel (i, j) -> (x_off + i*ds_x,
-        # y_off + j*ds_y). pyqtgraph's setImage(pos=, scale=) applies these
-        # in the opposite order and misplaces the image, so we build the
-        # transform ourselves.
-        tr = QtGui.QTransform()
-        tr.translate(float(x_off), float(y_off))
-        tr.scale(float(downsample_x), float(downsample_y))
-        self.setImage(display_img, autoLevels=True, autoRange=True, transform=tr)
+        self._set_image_with_transform(
+            img, x_off, y_off,
+            level0_shape[2] / lvl_shape[2], level0_shape[1] / lvl_shape[1],
+            auto_levels=True, auto_range=True,
+        )
 
     def _compute_view_scale(self):
         view_box = self.view.viewRect()
@@ -134,18 +249,17 @@ class DynamicImageView(pg.ImageView):
                 view_scale, axes=(-2, -1), current_level=self.current_level
             )
             lvl_shape = self.multires_image.get_level_shape(optimal_level)
-            if lvl_shape is None or len(lvl_shape) < 3:
+            if lvl_shape is None:
                 return
 
-            z_size, y_size, x_size = lvl_shape[-3:]
+            z_size, y_size, x_size = lvl_shape
             scale_z = level0_shape[0] / z_size if z_size > 0 else 1.0
             z_idx_L = int(np.clip(self.current_slice / scale_z, 0, z_size - 1))
 
-            downsample_y = level0_shape[-2] / lvl_shape[-2]
-            downsample_x = level0_shape[-1] / lvl_shape[-1]
+            downsample_y = level0_shape[1] / y_size
+            downsample_x = level0_shape[2] / x_size
             _, y_off, x_off = self.multires_image.get_world_offset(optimal_level)
 
-            # View bounds (world) -> level pixel indices, minus translation.
             vx0 = int(np.floor((view_box.left() - x_off) / downsample_x))
             vy0 = int(np.floor((view_box.top() - y_off) / downsample_y))
             vx1 = int(np.ceil((view_box.right() - x_off) / downsample_x))
@@ -160,36 +274,29 @@ class DynamicImageView(pg.ImageView):
             load_params = (optimal_level, z_idx_L, vy0, vy1, vx0, vx1)
             if load_params == self._last_load_params:
                 return
-
-            level_changed = (optimal_level != self.current_level)
-            if level_changed:
-                print(f"[sview] level transition: {self.current_level} -> {optimal_level}")
-
             self._last_load_params = load_params
-            self.current_level = optimal_level
 
-            img = self.multires_image.get_chunk_data_aligned(
-                optimal_level, z_idx_L, (vy0, vy1), (vx0, vx1)
-            )
-            if img is None or img.size == 0:
-                return
+            mi = self.multires_image
 
-            display = self._prepare_for_display(img)
-            self._current_display_data = display
+            def fetch():
+                return mi.get_chunk_data_aligned(optimal_level, z_idx_L, (vy0, vy1), (vx0, vx1))
 
-            x0_world = vx0 * downsample_x + x_off
-            y0_world = vy0 * downsample_y + y_off
+            def apply(img):
+                if img is None or img.size == 0:
+                    return
+                level_changed = optimal_level != self.current_level
+                self.current_level = optimal_level
+                self._set_image_with_transform(
+                    img, vx0 * downsample_x + x_off, vy0 * downsample_y + y_off,
+                    downsample_x, downsample_y,
+                )
+                if level_changed:
+                    self.levelChanged.emit(optimal_level, tuple(lvl_shape))
 
-            tr = QtGui.QTransform()
-            tr.translate(float(x0_world), float(y0_world))
-            tr.scale(float(downsample_x), float(downsample_y))
-            self.setImage(display, autoLevels=False, autoRange=False, transform=tr)
-
-            if level_changed:
-                self.levelChanged.emit(optimal_level, tuple(lvl_shape))
+            self._submit_fetch(fetch, apply)
 
         except Exception as e:
-            print(f"[sview] reload error: {e}")
+            _log.error(f"[sview] reload error: {e}")
             traceback.print_exc()
 
     def get_current_image_data(self):

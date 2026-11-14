@@ -9,6 +9,32 @@ import json
 from PyQt5 import QtWidgets, QtCore
 
 
+def _visit(group, fn):
+    """Call fn(name, obj) for every node below `group`, recursively.
+
+    h5py/z5py/zarr-v2 groups provide `visititems`; zarr-python 3 groups don't,
+    but expose `members(max_depth=None)`. Falls back to top-level keys.
+    """
+    if hasattr(group, 'visititems'):
+        try:
+            group.visititems(fn)
+            return
+        except Exception:
+            pass
+    if hasattr(group, 'members'):
+        try:
+            for name, obj in group.members(max_depth=None):
+                fn(name, obj)
+            return
+        except Exception:
+            pass
+    for key in group.keys():
+        try:
+            fn(key, group[key])
+        except Exception:
+            pass
+
+
 class ZarrMetadataExtractor:
     """Extract metadata from Zarr files (z5py compatible)"""
     
@@ -45,19 +71,16 @@ class ZarrMetadataExtractor:
                 metadata.append((f"/{name}/dtype", str(obj.dtype), "dtype"))
                 if hasattr(obj, 'chunks'):
                     metadata.append((f"/{name}/chunks", str(obj.chunks), "tuple"))
-                if hasattr(obj, 'compression'):
-                    metadata.append((f"/{name}/compression", str(obj.compression), "str"))
-        
-        try:
-            zarr_group.visititems(visit_items)
-        except AttributeError:
-            for key in zarr_group.keys():
-                try:
-                    obj = zarr_group[key]
-                    visit_items(key, obj)
-                except:
-                    pass
-        
+                for attr in ('compression', 'compressors'):
+                    if hasattr(obj, attr):
+                        try:
+                            val = getattr(obj, attr)
+                        except Exception:
+                            continue
+                        metadata.append((f"/{name}/{attr}", str(val), "str"))
+                        break
+
+        _visit(zarr_group, visit_items)
         return metadata
     
     @staticmethod
@@ -70,17 +93,8 @@ class ZarrMetadataExtractor:
                 structure.append((name, 'Dataset', obj.shape, obj.dtype))
             elif hasattr(obj, 'keys'):
                 structure.append((name, 'Group', None, None))
-        
-        try:
-            zarr_group.visititems(visit_items)
-        except AttributeError:
-            for key in zarr_group.keys():
-                try:
-                    obj = zarr_group[key]
-                    visit_items(key, obj)
-                except:
-                    pass
-        
+
+        _visit(zarr_group, visit_items)
         return structure
 
 
