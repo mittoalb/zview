@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "zview"
 version = "0.1.0"
-description = "Multi-resolution Zarr viewer (PyQt5 + pyqtgraph, optional VisPy 3D)"
+description = "Multi-resolution Zarr/N5 viewer with machine-adaptive 3D, plus a preset-driven offline 3D renderer"
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
@@ -17,9 +17,31 @@ dependencies = [
     "vispy",
 ]
 
+[project.optional-dependencies]
+# Offline renderer (zview-render), conversion (zview-convert) and vessel tools.
+render = [
+    "vtk>=9.2",
+    "scipy",
+    "scikit-image",
+    "imageio",
+    "imageio-ffmpeg",
+    "matplotlib",
+    "pillow",
+    "h5py",
+    "tifffile",
+    "numcodecs>=0.14",
+]
+docs = ["sphinx>=7", "furo", "myst-parser>=2", "sphinx-copybutton", "sphinx-design"]
+
 [project.scripts]
-zview = "zview.zview2:main"
+zview = "zview.viewer.app:main"
+zview-render = "zview.render.cli:main"
+zview-convert = "zview.tools.convert:main"
+zview-vessels = "zview.tools.vessels.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["zview*"]
 exclude = ["zview.__pycache__*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

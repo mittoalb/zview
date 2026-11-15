@@ -13,3 +13,6 @@ dist/
 
 # Local test data
 /tmp_test_data/
+
+# Docs build output
+docs/_build/
