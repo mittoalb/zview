@@ -46,3 +46,32 @@ def test_presets_listed_and_loadable():
     for n in ("generic", "interior", "metal", "labels", "tomo-brain", "draft"):
         assert n in names
         rc.load_preset(n)
+
+
+def test_validate_catches_typos_and_bad_values():
+    probs = rc.validate({"source": "x.zarr", "lok": "gold", "lighting": "sunny", "size": "1920 by 1080",
+                         "z_range": [900, 100], "regions": [{"name": "A", "z": 1}],
+                         "outputs": ["stills", "tour", "movie"], "tour": {"sped": 0.5}})
+    text = "\n".join(probs)
+    assert "unknown key 'lok'" in text and "'look'" in text           # did-you-mean
+    assert "unknown lighting 'sunny'" in text
+    assert "size must look like" in text and "z_range" in text
+    assert "regions[0]" in text and "outputs must be" in text and "tour.'sped'" in text
+
+
+def test_validate_clean_config():
+    assert rc.validate({"preset": ["interior", "draft"], "source": "x.zarr", "look": "jade",
+                        "regions": [{"name": "A", "z": 1, "y": 2, "x": 3}], "outputs": ["stills", "tour"],
+                        "_help": {"anything": 1}}) == []
+
+
+def test_volume_cache_follows_source_and_size(tmp_path):
+    from zview.render.cli import volume_is_current
+    vol = tmp_path / "v.npy"
+    vol.write_bytes(b"x")
+    cfg = {"source": "/data/a.zarr", "volume": str(vol), "volume_source": "/data/a.zarr", "volume_max_axis": 768}
+    assert volume_is_current(cfg, rc.effective(cfg))
+    assert not volume_is_current(cfg, rc.effective(cfg, {"source": "/data/b.zarr"}))   # another dataset
+    assert not volume_is_current(cfg, rc.effective(cfg, {"max_axis": 2048}))            # bigger job
+    gone = {**cfg, "volume": str(tmp_path / "missing.npy")}
+    assert not volume_is_current(gone, rc.effective(gone))

@@ -719,8 +719,12 @@ def main():
                 cfg[k] = old[k]
     cfg_path.write_text(json.dumps(cfg, indent=2))
     overrides = rc.parse_set(a.sets)
+    problems = rc.validate(cfg, overrides)
+    for msg in problems:
+        print(f"CONFIG WARNING: {{msg}}", flush=True)
     if a.dry_run:
         print(json.dumps(rc.effective(cfg, overrides), indent=2, default=str))
+        print("config OK" if not problems else f"{{len(problems)}} problem(s) found")
         return
     print(f"config: {{cfg_path}}", flush=True)
     run(cfg_path, a.what, overrides, out)

@@ -35,13 +35,15 @@ and the cached volume is reused unless you pass `--force`.
 ## `zview-render run`
 
 ```text
-zview-render run CONFIG [what ...] [--preset P]... [--set KEY=VALUE]... [--out DIR] [-- extra args]
+zview-render run CONFIG [what ...] [--preset P]... [--set KEY=VALUE]... [--out DIR] [--dry-run] [-- extra args]
 ```
 
 `what`: `stills`, `turntable`, `tour`, `surface`, `all` (default: the
 config's `outputs`). `--preset` replaces the config's presets and can be
 repeated. Arguments after `--` go straight to the underlying renderer, for
-example `-- --keep-frames`.
+example `-- --keep-frames`. `--dry-run` checks the config and prints the merged
+settings without rendering (exit code 1 if it finds problems). See
+[](batch.md) for writing configs by hand.
 
 ## `zview-render presets`, `looks`
 

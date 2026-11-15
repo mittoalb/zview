@@ -92,5 +92,6 @@ marks where material starts for the opacity curves.
 - [](presets.md): ready-made combinations.
 - [](outputs.md): stills, turntables, tour videos and surfaces.
 - [](dialog.md): rendering from the viewer.
+- [](batch.md): writing batch jobs (JSON) by hand, with examples.
 - [](config.md): every config key.
 - [](cli.md): command reference.

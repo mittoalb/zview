@@ -1,5 +1,8 @@
 # Config reference
 
+This page lists every key. For a step-by-step guide to writing a job by hand,
+with complete examples, see [](batch.md).
+
 A render config is a JSON file, normally `render.json` written by
 `zview-render prepare`. Configs from zarr-auto-render (`dataset.json`) still
 work: their keys are a subset of these. Any key may also be set with

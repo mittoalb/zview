@@ -250,12 +250,17 @@ def prepare(source, out, preset=None, max_axis=None, step=None, dataset=None, pi
             step = int(base.get("factor") or 8)
     k = kind(src)
     tag = f"step{step}" if step else f"max{max_axis}"
-    npy = out / f"volume_{tag}.npy"
-    info_path = out / f"volume_{tag}.json"
+    # Source-specific names: several datasets may share one folder.
+    stem = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in src.stem)[:48] or "data"
+    npy = out / f"volume_{stem}_{tag}.npy"
+    info_path = out / f"volume_{stem}_{tag}.json"
     info = {}
-    if npy.exists() and info_path.exists() and not force:
-        print(f"cached volume exists: {npy}")
+    cached = npy.exists() and info_path.exists() and not force
+    if cached:
         info = json.loads(info_path.read_text())
+        cached = info.get("source", str(src)) == str(src)
+    if cached:
+        print(f"cached volume exists: {npy}")
     else:
         if k == "zarr":
             info = prepare_zarr(src, npy, max_axis=max_axis, step=step, workers=workers)
@@ -269,6 +274,7 @@ def prepare(source, out, preset=None, max_axis=None, step=None, dataset=None, pi
             else:
                 info = prepare_tiff(src, npy, step, workers)
             info.setdefault("factor", step)
+        info["source"] = str(src)
         info_path.write_text(json.dumps(info))
     factor = info.get("factor", step)
     side_views(npy, factor, out / "side_views_grid.png")
@@ -283,10 +289,18 @@ def prepare(source, out, preset=None, max_axis=None, step=None, dataset=None, pi
         fac = fac[0]
     vs = info.get("voxel_size")
     cfg = {
+        "_comment": ("Render settings for zview-render. Edit this file, check it with "
+                     "'zview-render run render.json --dry-run', then render with "
+                     "'zview-render run render.json'. null means: use the preset's value. "
+                     "The keys are explained in the zview documentation, page "
+                     "'Batch jobs: writing the JSON'; 'zview-render presets' and "
+                     "'zview-render looks' list the names you can use."),
         "preset": preset or "generic",
         "source": str(src),
         "hdf5_dataset": info.get("dataset", dataset),
         "volume": str(npy.resolve()),
+        "volume_source": str(src),
+        "volume_max_axis": max_axis if not step else None,
         "factor": fac,
         "pixel_size_um": pixel_size or info.get("pixel_size") or 1.0,
         "voxel_size_um": vs if vs and len(set(vs)) > 1 else None,
@@ -295,21 +309,6 @@ def prepare(source, out, preset=None, max_axis=None, step=None, dataset=None, pi
         "title": "", "subtitle": "", "credit": "",
         "z_range": None, "cylinder": None, "regions": [],
         "look": None, "lighting": None, "size": None,
-        "_help": {
-            "preset": "name(s) of presets: " + ", ".join(rc.available_presets()) +
-                      "; a list combines them, e.g. [\"generic\", \"presentation-4k\"]",
-            "null": "null = use the preset's value; any DEFAULTS key may be set here",
-            "outputs": "[\"stills\", \"turntable\", \"tour\", \"surface\"]",
-            "z_range": "[Z0, Z1] full-res slices to keep; null = all",
-            "cylinder": "[CY, CX, R] or [CY_TOP, CX_TOP, CY_BOTTOM, CX_BOTTOM, R] full-res px: keep only "
-                        "inside the container; null = no cut (tomo preprocessing fits the wall itself)",
-            "regions": "[{\"name\": \"Cerebellum\", \"z\": 3800, \"y\": 6144, \"x\": 4200}, ...] "
-                       "full-res centres of the tour close-ups",
-            "look": "bone, organic, tissue, ivory, gold, copper, jade, ice, ember, coolwarm, xray, grays, "
-                    "viridis, inferno, magma, plasma, cividis, turbo, or any matplotlib colormap",
-            "lighting": "studio, soft, dramatic, top, flat",
-            "read": "positions can be read off side_views_grid.png",
-        },
     }
     cfg_path.write_text(json.dumps(cfg, indent=2))
     print(f"settings -> {cfg_path}\nEdit it, then:  zview-render run {cfg_path}")

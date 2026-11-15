@@ -2,7 +2,7 @@
 
     zview-render quick  SOURCE --out DIR [--preset P] [what ...] [--set k=v ...]
     zview-render prepare SOURCE --out DIR [--preset P] [--max-axis 768 | --step 8]
-    zview-render run    DIR/render.json [what ...] [--preset P] [--set k=v ...] [-- extra args]
+    zview-render run    DIR/render.json [what ...] [--preset P] [--set k=v ...] [--dry-run] [-- extra args]
     zview-render presets [NAME]              list presets, or show one
     zview-render presets --save NAME --from DIR/render.json   save a config as a user preset
     zview-render looks                       list looks, opacity curves, lighting rigs
@@ -52,37 +52,92 @@ def _expand_what(items, c):
     return list(dict.fromkeys(out))
 
 
-def ensure_volume(cfg_path, cfg, c):
-    """Prepare the cached volume if the config doesn't point at one yet."""
+def _same_path(a, b):
+    try:
+        return Path(str(a)).expanduser().resolve() == Path(str(b)).expanduser().resolve()
+    except OSError:
+        return str(a) == str(b)
+
+
+def volume_is_current(cfg, c):
+    """True if the config's cached volume can be used for the merged settings.
+
+    The cache must exist, come from the same source (a --set source=… for
+    another dataset must not reuse it) and, if max_axis was raised or
+    lowered, have been made with that size.
+    """
     vol = c.get("volume")
-    if vol and Path(vol).exists():
-        return c
+    if not vol or not Path(vol).exists():
+        return False
+    src, vsrc = c.get("source"), cfg.get("volume_source") or cfg.get("source")
+    if src and vsrc and not _same_path(src, vsrc):
+        return False
+    made = cfg.get("volume_max_axis")
+    return not (made and c.get("max_axis") and int(made) != int(c["max_axis"]))
+
+
+def ensure_volume(cfg_path, cfg, c):
+    """Prepare the cached volume (next to the config) and record it in the config."""
     if not c.get("source"):
         raise SystemExit(f"{cfg_path}: no 'volume' and no 'source' to prepare one from")
     from zview.render import prepare as rp
-    _log(f"no cached volume — preparing from {c['source']}")
-    tmp = rp.prepare(c["source"], Path(cfg_path).parent, preset=c["preset"],
-                     max_axis=c.get("max_axis") if c.get("max_axis") else None,
-                     step=None if c.get("max_axis") else int(rc.DEFAULTS["factor"] if isinstance(c["factor"], list)
-                                                             else c["factor"]),
+    _log(f"preparing a render volume from {c['source']}")
+    max_axis = c.get("max_axis") or None
+    step = None if max_axis else int(c["factor"][0] if isinstance(c["factor"], list) else c["factor"])
+    tmp = rp.prepare(c["source"], Path(cfg_path).parent, preset=c["preset"], max_axis=max_axis, step=step,
                      dataset=c.get("hdf5_dataset"), config_name="render.prepared.json")
     prepared = json.loads(Path(tmp).read_text())
-    for k in ("volume", "factor", "voxel_size_um", "pixel_size_um"):
-        if prepared.get(k) is not None and cfg.get(k) is None or k in ("volume", "factor"):
-            cfg[k] = prepared.get(k)
-    Path(cfg_path).write_text(json.dumps(cfg, indent=2))
     Path(tmp).unlink(missing_ok=True)
-    return rc.effective(cfg)
+    for k in ("volume", "factor", "volume_source", "volume_max_axis"):
+        cfg[k] = prepared.get(k)
+    for k in ("voxel_size_um", "pixel_size_um", "hdf5_dataset"):
+        if cfg.get(k) is None and prepared.get(k) is not None:
+            cfg[k] = prepared[k]
+    if prepared.get("preprocess") == "labels":
+        # The data is a label map: use the labels setup unless the job chose otherwise.
+        cfg.setdefault("labels", prepared.get("labels"))
+        if cfg.get("preprocess") is None:
+            cfg["preprocess"] = "labels"
+        if "preset" not in cfg:
+            cfg["preset"] = "labels"
+    Path(cfg_path).write_text(json.dumps(cfg, indent=2))
+    return cfg
+
+
+def report(problems):
+    for msg in problems:
+        _log(f"CONFIG WARNING: {msg}")
+
+
+def dry_run(cfg_path, overrides=None, what=None, cfg=None):
+    """Validate a config and print the merged settings (nothing is rendered)."""
+    cfg = cfg if cfg is not None else rc.load(cfg_path)
+    problems = rc.validate(cfg, overrides)
+    c = rc.effective(cfg, overrides)
+    print(json.dumps(c, indent=2, default=str))
+    try:
+        todo = _expand_what(what, c)
+    except SystemExit as e:
+        problems.append(str(e))
+        todo = []
+    _log(f"\noutputs: {', '.join(todo) or '-'}")
+    if problems:
+        report(problems)
+        _log(f"{len(problems)} problem(s) found")
+        return 1
+    _log("config OK")
+    return 0
 
 
 def run(cfg_path, what=None, overrides=None, out=None, extra=()):
     """Render the outputs of a config. Returns the output folder."""
     cfg_path = Path(cfg_path).resolve()
     cfg = rc.load(cfg_path)
+    report(rc.validate(cfg, overrides))
     c = rc.effective(cfg, overrides)
-    c = ensure_volume(cfg_path, cfg, c) if not (c.get("volume") and Path(c["volume"]).exists()) else c
-    if overrides:
-        c = rc.effective(rc.load(cfg_path), overrides)
+    if not volume_is_current(cfg, c):
+        cfg = ensure_volume(cfg_path, cfg, c)
+        c = rc.effective(cfg, overrides)
     todo = _expand_what(what, c)
     base = Path(out).resolve() if out else cfg_path.parent
     base.mkdir(parents=True, exist_ok=True)
@@ -125,7 +180,7 @@ def _cmd_presets(a):
         cfg = rc.load(a.from_config)
         keep = {k: v for k, v in cfg.items()
                 if k not in ("source", "volume", "hdf5_dataset", "factor", "pixel_size_um", "voxel_size_um",
-                             "regions", "z_range", "cylinder", "_help") and v is not None}
+                             "regions", "z_range", "cylinder", "_help", "_comment") and v is not None}
         keep["_description"] = a.description or f"saved from {a.from_config}"
         f = rc.save_user_preset(a.save, keep)
         _log(f"saved preset {a.save!r} -> {f}")
@@ -180,6 +235,8 @@ def main(argv=None):
         p.add_argument("--set", dest="sets", action="append", default=[], metavar="KEY=VALUE",
                        help="override any setting, e.g. --set look=gold --set tour.speed=0.5")
         p.add_argument("--out", type=Path, default=None, help="output folder (default: next to the config)")
+        p.add_argument("--dry-run", action="store_true",
+                       help="check the config and print the merged settings; render nothing")
         if cmd == "quick":
             p.add_argument("--max-axis", type=int, default=None)
             p.add_argument("--step", type=int, default=None)
@@ -193,10 +250,16 @@ def main(argv=None):
             if a.out is None:
                 raise SystemExit("quick needs --out DIR")
             preset = overrides.get("preset") or "generic"
+            if a.dry_run:
+                return dry_run(None, overrides, a.what, {"source": str(a.target), "preset": preset})
             cfg_path = rp.prepare(a.target, a.out, preset=preset, max_axis=a.max_axis, step=a.step,
                                   dataset=a.dataset)
-            return run(cfg_path, a.what, overrides, None, extra)
-        return run(a.target, a.what, overrides, a.out, extra)
+            run(cfg_path, a.what, overrides, None, extra)
+            return 0
+        if a.dry_run:
+            return dry_run(a.target, overrides, a.what)
+        run(a.target, a.what, overrides, a.out, extra)
+        return 0
 
     if cmd == "presets":
         p = argparse.ArgumentParser(prog="zview-render presets")
@@ -204,9 +267,11 @@ def main(argv=None):
         p.add_argument("--save", metavar="NAME")
         p.add_argument("--from", dest="from_config", type=Path)
         p.add_argument("--description", default=None)
-        return _cmd_presets(p.parse_args(rest))
+        _cmd_presets(p.parse_args(rest))
+        return 0
     if cmd == "looks":
-        return _cmd_looks(None)
+        _cmd_looks(None)
+        return 0
 
     raise SystemExit(f"unknown command {cmd!r}\n\n{__doc__}")
 

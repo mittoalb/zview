@@ -92,6 +92,7 @@ rendering/looks
 rendering/presets
 rendering/outputs
 rendering/dialog
+rendering/batch
 rendering/config
 rendering/cli
 ```

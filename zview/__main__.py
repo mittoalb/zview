@@ -1,3 +1,3 @@
 from zview.viewer.app import main
 
-main()
+raise SystemExit(main())

@@ -22,6 +22,8 @@ DEFAULTS = {
     "source": None,            # original data: Zarr/N5 store, HDF5 file or TIFF folder
     "hdf5_dataset": None,
     "volume": None,            # cached downsampled volume (.npy)
+    "volume_source": None,     # source the cached volume was made from (set by zview)
+    "volume_max_axis": None,   # max_axis it was made with (set by zview)
     "factor": 8,               # .npy step vs full resolution: number or [z, y, x]
     "pixel_size_um": 1.0,      # x voxel size, for scale bars
     "voxel_size_um": None,     # [z, y, x] full-res voxel size (anisotropic data)
@@ -322,3 +324,92 @@ def surface_argv(c, cfg_path, out):
     if c.get("exposure") is not None:
         a += ["--exposure", str(c["exposure"])]
     return a
+
+
+# ------------------------------------------------------------ validation
+
+_OUTPUTS = {"stills", "turntable", "tour", "surface"}
+_TOUR_KEYS = {"speed", "scroll", "zoom", "region_size"}
+_SURFACE_KEYS = {"ao", "shadows", "pbr", "roughness"}
+_META_KEYS = {"_help", "_description", "_comment"}
+
+
+def validate(cfg, overrides=None):
+    """Problems in a render config, as a list of human-readable strings.
+
+    Checks the raw config (unknown or misspelled keys, which would otherwise
+    be ignored silently) and the merged settings (names of presets, looks,
+    lighting rigs and curves, value shapes, what each output needs).
+    """
+    from zview.render import looks as lk
+    problems = []
+
+    def close(key, pool):
+        import difflib
+        m = difflib.get_close_matches(key, pool, n=1)
+        return f" (did you mean {m[0]!r}?)" if m else ""
+
+    for src in (cfg, overrides or {}):
+        for k, v in src.items():
+            if k in _META_KEYS or k.startswith("_"):
+                continue
+            if k not in DEFAULTS:
+                problems.append(f"unknown key {k!r}{close(k, DEFAULTS)} — it is ignored")
+            elif k == "tour" and isinstance(v, dict):
+                problems += [f"unknown key tour.{t!r}{close(t, _TOUR_KEYS)}" for t in v if t not in _TOUR_KEYS]
+            elif k == "surface" and isinstance(v, dict):
+                problems += [f"unknown key surface.{t!r}{close(t, _SURFACE_KEYS)}" for t in v if t not in _SURFACE_KEYS]
+    try:
+        c = effective(cfg, overrides)
+    except KeyError as e:
+        return problems + [str(e).strip('"')]
+
+    def check(cond, msg):
+        if not cond:
+            problems.append(msg)
+
+    look = c.get("look")
+    if isinstance(look, str):
+        try:
+            lk.get_look(look)
+        except ValueError as e:
+            problems.append(str(e))
+    light = c.get("lighting")
+    if isinstance(light, str) and light not in lk.LIGHTING:
+        problems.append(f"unknown lighting {light!r}; choose from {', '.join(lk.LIGHTING)}")
+    check(c.get("curve") in (None, "solid", "soft", "layered", "glass", "mip"),
+          f"unknown curve {c.get('curve')!r}; use solid, soft, layered, glass or mip")
+    check(c.get("preprocess") in ("none", "tomo", "labels"),
+          f"preprocess must be none, tomo or labels, not {c.get('preprocess')!r}")
+    check(c.get("tone_mapping") in ("filmic", "none"), "tone_mapping must be filmic or none")
+    check(c.get("background") in ("look", "black", "white", "grey"), "background must be look, black, white or grey")
+    outs = c.get("outputs") or []
+    check(isinstance(outs, list) and all(o in _OUTPUTS for o in outs),
+          f"outputs must be a list of {sorted(_OUTPUTS)}, got {outs!r}")
+    size = str(c.get("size", ""))
+    check(len(size.lower().split("x")) == 2 and all(x.isdigit() for x in size.lower().split("x")),
+          f"size must look like '1920x1080', got {size!r}")
+    zr = c.get("z_range")
+    check(zr is None or (isinstance(zr, list) and len(zr) == 2 and zr[0] < zr[1]),
+          f"z_range must be [Z0, Z1] with Z0 < Z1, got {zr!r}")
+    cyl = c.get("cylinder")
+    check(cyl is None or (isinstance(cyl, list) and len(cyl) in (3, 5)),
+          f"cylinder must be [CY, CX, R] or [CY_TOP, CX_TOP, CY_BOTTOM, CX_BOTTOM, R], got {cyl!r}")
+    wv = c.get("window_values")
+    check(wv is None or (isinstance(wv, list) and len(wv) == 2 and wv[0] < wv[1]),
+          f"window_values must be [lo, hi] with lo < hi, got {wv!r}")
+    for i, r in enumerate(c.get("regions") or []):
+        check(isinstance(r, dict) and all(k in r for k in ("name", "z", "y", "x")),
+              f"regions[{i}] needs name, z, y, x (full-resolution voxels), got {r!r}")
+    if "tour" in outs:
+        check(bool(c.get("source")), "the tour needs 'source' (the full-resolution data)")
+    if not c.get("volume") and not c.get("source"):
+        problems.append("set 'source' (the data) — or 'volume' (a prepared .npy)")
+    labels = c.get("labels")
+    if labels is not None:
+        check(isinstance(labels, dict) and all(str(k).lstrip("-").isdigit() and isinstance(v, dict)
+                                               for k, v in labels.items()),
+              "labels must map class values (as strings) to {name, color, opacity, visible}")
+        if c.get("preprocess") != "labels":
+            problems.append("'labels' is set but preprocess is not 'labels' (use the labels preset)")
+    return problems
