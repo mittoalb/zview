@@ -1,4 +1,3 @@
-# Moved from zarr-auto-render/render_cpu.py.
 """CPU volume renderer for a multiscale OME-Zarr — no OpenGL, no display, no GPU.
 
 Headless servers often can't give napari/vispy a working OpenGL context
@@ -18,7 +17,7 @@ Sample-in-a-tube preprocessing (on by default):
 so the tissue, not the tube, is what shows up.
 
 Example:
-    python render_cpu.py rec.zarr --out renders --frames 180 --modes mip,comp
+    zview-render cpu rec.zarr --out renders --frames 180 --modes mip,comp
 """
 
 import argparse

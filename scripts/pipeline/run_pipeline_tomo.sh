@@ -48,8 +48,7 @@ MAX_LEVELS="${MAX_LEVELS:-6}"
 # Rendering knobs
 TURNTABLE_FRAMES="${TURNTABLE_FRAMES:-180}"
 SLICE_FRAMES="${SLICE_FRAMES:-240}"
-RENDERING="${RENDERING:-attenuated_mip}"
-COLORMAP="${COLORMAP:-gray_r}"
+COLORMAP="${COLORMAP:-gray}"
 # Renderer uses the finest pyramid level <= BUDGET_GB; keep it under one GPU's VRAM
 BUDGET_GB="${BUDGET_GB:-32}"
 # ---------------------------------------------------------------------------
@@ -70,7 +69,7 @@ if [[ ! -x "$ENV_PY" ]]; then
     say "ERROR: python not found at $ENV_PY — override with ENV_PY=... or create the env first."
     exit 1
 fi
-for f in "$ZVIEW_ROOT/zview/convert.py" "$ZVIEW_ROOT/zview/render/napari_render.py"; do
+for f in "$ZVIEW_ROOT/zview/tools/convert.py" "$ZVIEW_ROOT/zview/render/cpu.py"; do
     if [[ ! -f "$f" ]]; then
         say "ERROR: missing module: $f (set ZVIEW_ROOT to the zview repo path)"
         exit 1
@@ -130,7 +129,7 @@ fi
 
 say "launching conversion -> $OUT_ZARR"
 # shellcheck disable=SC2086
-"$ENV_PY" -m zview.convert "$SRC_H5" "$OUT_ZARR" \
+"$ENV_PY" -m zview.tools.convert "$SRC_H5" "$OUT_ZARR" \
     --dtype "$OUT_DTYPE" \
     --chunk-size $CHUNK \
     --shard-size $SHARD \
@@ -156,12 +155,10 @@ say "total files in $OUT_ZARR: $total_files"
 # ---------- Render --------------------------------------------------------
 say "launching renders -> $RENDER_DIR"
 export QT_QPA_PLATFORM=offscreen
-"$ENV_PY" -m zview.render napari "$OUT_ZARR" \
-    --batch \
+"$ENV_PY" -m zview.render cpu "$OUT_ZARR" \
     --budget-gb "$BUDGET_GB" \
-    --rendering "$RENDERING" \
-    --colormap "$COLORMAP" \
-    --turntable "$TURNTABLE_FRAMES" \
+    --cmaps "$COLORMAP" \
+    --frames "$TURNTABLE_FRAMES" \
     --slice-sweep "$SLICE_FRAMES" \
     --out "$RENDER_DIR" \
     2>&1 | tee "$LOG_DIR/render.log"

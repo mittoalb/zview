@@ -1,4 +1,3 @@
-# Moved from zarr-auto-render/h5_to_zarr.py.
 """HDF5 or TIFF-stack (reconstructed tomography volume) -> multiscale sharded OME-Zarr v3.
 
 Modeled on DataTools' tiff2zarr but:
@@ -16,7 +15,7 @@ Output layout (OME-Zarr v0.4 multiscales):
     ...
 
 Example:
-    python3 h5_to_zarr.py /path/to/rec.h5 \\
+    zview-convert /path/to/rec.h5 \\
         /path/to/rec.zarr \\
         --dataset /exchange/data \\
         --shard-size 512 512 512 \\
@@ -29,7 +28,6 @@ Example:
 import argparse
 import os
 import shutil
-import sys
 import time
 from pathlib import Path
 

@@ -43,6 +43,11 @@ shadows.
 :::
 ::::
 
+`labels`
+: [Label maps](../labels.md): class colours from the metadata, background
+  hidden, bulk classes as faint glass, smooth per-class shading. `prepare`
+  selects it automatically for label data.
+
 `tomo-brain`
 : The original zarr-auto-render pipeline for a sample (such as a brain) in a
   container: `tomo` preprocessing (medium removal, wall fit, Z equalisation),

@@ -95,7 +95,7 @@ def run(cfg_path, what=None, overrides=None, out=None, extra=()):
     extra = list(extra)
 
     if "stills" in todo or "turntable" in todo:
-        from zview.render import vtk_render
+        from zview.render import scene as vtk_render
         argv = rc.turntable_argv(c, base / "renders", stills="stills" in todo,
                                  turntable="turntable" in todo) + extra
         _log("vtk_render " + " ".join(argv))
@@ -208,10 +208,6 @@ def main(argv=None):
     if cmd == "looks":
         return _cmd_looks(None)
 
-    # Compatibility with zarr-auto-render's pipeline3d.py: CONFIG [what].
-    if cmd.endswith(".json"):
-        return run(cmd, [w for w in rest if not w.startswith("-")], None, None,
-                   [w for w in rest if w.startswith("-")] + extra)
     raise SystemExit(f"unknown command {cmd!r}\n\n{__doc__}")
 
 

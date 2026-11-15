@@ -1,15 +1,14 @@
-# Moved from zarr-auto-render/vessels_render.py.
 """3D video of a vessel mask: red vessels inside a translucent brain (VTK).
 
-    python vessels_render.py VESSELS.zarr --image INPUT --out DIR [--title ...] [--credit ...]
-    python vessels_render.py VESSELS.zarr --config dataset.json --out DIR      # full-res masks
+    zview-vessels render VESSELS.zarr --image INPUT --out DIR [--title ...] [--credit ...]
+    zview-vessels render VESSELS.zarr --config render.json --out DIR      # full-res masks
 
-VESSELS.zarr comes from vessels_segment.py or vessels_fullres.py. The level rendered is the
+VESSELS.zarr comes from zview-vessels segment or fullres. The level rendered is the
 finest whose size is <= --max-voxels (default 4e9; a 15 um whole brain fits at level 0).
 The translucent brain comes from
   --image   the pre-masked volume the vessels were segmented from (voxels > 0), same grid
-  --config  dataset.json from prepare3d.py (brain mask of the render pipeline; use this for
-            vessels_fullres.py masks of an unmasked scan)
+  --config  render.json from zview-render prepare (brain mask of the render pipeline; use this for
+            zview-vessels fullres masks of an unmasked scan)
 Title / subtitle / credit / size can be given directly or are taken from --config.
 
 Outputs in DIR: turntable_vessels.mp4, stills/. Needs a display (DISPLAY set) and VTK.
@@ -18,7 +17,6 @@ Outputs in DIR: turntable_vessels.mp4, stills/. Needs a display (DISPLAY set) an
 import argparse
 import json
 import os
-import sys
 import time
 from pathlib import Path
 
@@ -126,7 +124,7 @@ def render(out, V, brain2, size, frames, elev, title, sub, credit):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("mask", type=Path, help="vessel-mask Zarr (vessels_segment.py / vessels_fullres.py)")
+    p.add_argument("mask", type=Path, help="vessel-mask Zarr (zview-vessels segment / fullres)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--image", type=Path, default=None, help="pre-masked volume (TIFF folder / Zarr / HDF5) for the brain")
     p.add_argument("--image-level", default="0", help="Zarr image: level matching mask level 0 (default 0)")
@@ -154,7 +152,7 @@ def main(argv=None):
         pass
 
     if args.image is not None:
-        from zview.vessels.segment import open_volume
+        from zview.tools.vessels.segment import open_volume
         V = np.asarray(root[lvl])
         img = open_volume(args.image, args.image_level)
         nz, ny, nx = V.shape
@@ -166,7 +164,7 @@ def main(argv=None):
                 b[k, :sl.shape[0], :sl.shape[1]] = sl[:b.shape[1], :b.shape[2]]
         brain2 = b
     elif args.config is not None:
-        from zview.render import vtk_render as rv
+        from zview.render import scene as rv
         from scipy import ndimage as ndi
         pa = argparse.Namespace(volume=Path(cfg["volume"]), factor=cfg["factor"], down=2, z_range=cfg.get("z_range"),
                                 cylinder=cfg.get("cylinder"), lo_pct=60, hi_pct=99.7, keep_largest=True, open_iter=6,

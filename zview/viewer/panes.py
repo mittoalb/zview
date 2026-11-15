@@ -1,15 +1,32 @@
-"""Axis-oriented ortho view (XY / XZ / YZ) with crosshair + click-to-sync."""
+"""2D slice panes: XY / XZ / YZ views with lazy, asynchronous pyramid loading.
 
-import traceback
+A `SlicePane` shows one plane through the volume. It loads only the chunks
+covering the visible region, at the pyramid level that samples it at about
+one voxel per screen pixel, on a background thread (newer requests supersede
+older ones). It draws the crosshair of the shared (z, y, x) position, reports
+the cursor's world coordinate and pixel value, and turns clicks into
+position picks.
+"""
 
-import numpy as np
-import pyqtgraph as pg
-from PyQt5 import QtCore
+# Bind PyOpenGL to the same GL libraries as Qt before pyqtgraph imports it.
+from zview.core.sysinfo import apply_gl_compat as _apply_gl_compat
+_apply_gl_compat()
 
-from zview import _log
-from zview.sview import DynamicImageView
-from zview.theme import AXIS_PLANE, PLANE_COLORS
+import math  # noqa: E402
+import traceback  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
+import numpy as np  # noqa: E402
+import pyqtgraph as pg  # noqa: E402
+from PyQt5 import QtCore, QtGui  # noqa: E402
+
+from zview.core import log as _log  # noqa: E402
+from zview.viewer.theme import AXIS_PLANE, PLANE_COLORS  # noqa: E402
+
+# dtypes pyqtgraph renders natively (with levels + LUT); anything else is
+# converted to float32 once per frame.
+_NATIVE_DTYPES = {np.dtype(t) for t in (np.uint8, np.uint16, np.int8, np.int16,
+                                        np.float32, np.float64)}
 
 # Per-axis geometry: (vertical world axis index, horizontal world axis index,
 # fixed-slice world axis index). Indexing is on (z, y, x).
@@ -30,18 +47,180 @@ _SEL_AXES = {
 AXIS_LETTERS = ('z', 'y', 'x')
 
 
-class OrthoImageView(DynamicImageView):
-    """A single ortho pane: XY, XZ, or YZ, with crosshair, click-to-move-slice,
-    and the same chunk-aligned lazy loading as sview."""
+class SlicePane(pg.ImageView):
+    """One plane (XY, XZ or YZ) with crosshair, click-to-pick and lazy loading."""
 
-    # Left click picked a voxel: full (z, y, x) in level-0 coords. The pane's
+    levelChanged = QtCore.pyqtSignal(int, tuple)
+    # World coords (h, v) under the cursor and the displayed pixel value
+    # there (NaN when outside the image).
+    cursorMoved = QtCore.pyqtSignal(float, float, float)
+    # Ctrl+wheel over the pane: request a slice step of +/-1.
+    sliceStepRequested = QtCore.pyqtSignal(int)
+    # Left click picked a voxel: full (z, y, x) in level-0 coords; the pane's
     # fixed axis keeps its current value.
     positionPicked = QtCore.pyqtSignal(int, int, int)
-    # Legacy: (h, v) world ints of the click, in this pane's on-screen axes.
-    crosshairMoved = QtCore.pyqtSignal(int, int)
+
+    # Internal: worker thread -> GUI thread hand-off of fetched pixels.
+    _fetched = QtCore.pyqtSignal(int, object)
+
+    _RELOAD_DEBOUNCE_MS = 100
+
+    def _init_loading(self):
+        """State + timers for lazy, asynchronous region loading."""
+        self.multires_image = None
+        self.current_level = 0
+        self.current_slice = 0
+        self._last_load_params = None
+        self._initial_load_done = False
+        self._current_display_data = None
+
+        self._reload_timer = QtCore.QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.timeout.connect(self._reload_visible_region)
+        self.view.sigRangeChanged.connect(self._on_view_changed)
+
+        if getattr(self, "imageItem", None) is not None:
+            self.imageItem.setAutoDownsample(True)
+
+        self.scene.sigMouseMoved.connect(self._emit_cursor_moved)
+        self.ui.graphicsView.viewport().installEventFilter(self)
+
+        # Region fetches run off the GUI thread so panning/slicing never
+        # blocks on I/O. One worker per pane keeps requests ordered; stale
+        # requests are skipped by generation number.
+        self._loader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="zview-pane")
+        self._req_gen = 0
+        self.has_refined = False   # a region fetch has been shown since attach
+        self._fetched.connect(self._on_fetched)
+
+    # ------------------------------------------------------------ async fetch
+
+    def _submit_fetch(self, fetch, apply):
+        """Run `fetch()` on the pane's worker; call `apply(result)` on the GUI
+        thread if no newer request has been made in the meantime."""
+        self._req_gen += 1
+        gen = self._req_gen
+
+        def work():
+            if gen != self._req_gen:
+                return  # superseded before it started
+            try:
+                res = fetch()
+            except Exception as e:  # surfaced on the GUI thread
+                res = e
+            self._fetched.emit(gen, (res, apply))
+
+        self._loader.submit(work)
+
+    def _cancel_pending(self):
+        self._req_gen += 1
+        self.has_refined = False
+
+    def _on_fetched(self, gen, payload):
+        if gen != self._req_gen:
+            return
+        res, apply = payload
+        if isinstance(res, Exception):
+            _log.error(f"[{type(self).__name__}] fetch error: {res}")
+            self._last_load_params = None
+            return
+        try:
+            apply(res)
+            self.has_refined = True
+        except Exception as e:
+            _log.error(f"[{type(self).__name__}] apply error: {e}")
+            traceback.print_exc()
+
+    def schedule_refine(self, delay_ms=None):
+        """Reload the visible region at the right level after `delay_ms`."""
+        if self.multires_image is not None:
+            self._reload_timer.start(self._RELOAD_DEBOUNCE_MS if delay_ms is None else delay_ms)
+
+    # ------------------------------------------------------------ events
+
+    def eventFilter(self, obj, event):
+        if (event.type() == QtCore.QEvent.Wheel
+                and event.modifiers() & QtCore.Qt.ControlModifier):
+            delta = event.angleDelta().y()
+            if delta:
+                self.sliceStepRequested.emit(1 if delta > 0 else -1)
+            return True
+        return super().eventFilter(obj, event)
+
+    def pixel_value_at(self, scene_pos):
+        """Displayed value under `scene_pos`, or NaN."""
+        data = self._current_display_data
+        if data is None or data.ndim != 2 or self.imageItem is None:
+            return math.nan
+        p = self.imageItem.mapFromScene(scene_pos)
+        col, row = int(math.floor(p.x())), int(math.floor(p.y()))
+        if 0 <= row < data.shape[0] and 0 <= col < data.shape[1]:
+            try:
+                return float(data[row, col])
+            except (TypeError, ValueError):
+                return math.nan
+        return math.nan
+
+    def _emit_cursor_moved(self, scene_pos):
+        if self.image is None:
+            return
+        p = self.view.mapSceneToView(scene_pos)
+        self.cursorMoved.emit(float(p.x()), float(p.y()), self.pixel_value_at(scene_pos))
+
+
+    def detach(self):
+        """Drop the dataset and blank the pane (e.g. on File > Close)."""
+        self._reload_timer.stop()
+        self._cancel_pending()
+        self.multires_image = None
+        self._last_load_params = None
+        self._initial_load_done = False
+        self._current_display_data = None
+        self.clear()
+
+    def _on_view_changed(self, *_):
+        if self._initial_load_done:
+            self._reload_timer.start(self._RELOAD_DEBOUNCE_MS)
+
+    @staticmethod
+    def _prepare_for_display(image):
+        if image is None or image.size == 0:
+            return image
+        if image.dtype in _NATIVE_DTYPES:
+            return image
+        return image.astype(np.float32, copy=False)
+
+    def _set_image_with_transform(self, img, pos_x, pos_y, ds_x, ds_y,
+                                  auto_levels=False, auto_range=False):
+        """Show `img` with level pixel (i, j) -> world (pos_x + i*ds_x, pos_y + j*ds_y).
+
+        Translate-then-scale: pyqtgraph's setImage(pos=, scale=) applies these
+        in the opposite order and misplaces the image, so we build the
+        transform ourselves.
+        """
+        display = self._prepare_for_display(img)
+        self._current_display_data = display
+        tr = QtGui.QTransform()
+        tr.translate(float(pos_x), float(pos_y))
+        tr.scale(float(ds_x), float(ds_y))
+        self.setImage(display, autoLevels=auto_levels, autoRange=auto_range, transform=tr)
+
+    def _compute_view_scale(self):
+        view_box = self.view.viewRect()
+        widget_size = self.view.size()
+        if widget_size.width() <= 0 or view_box.width() <= 0 or view_box.height() <= 0:
+            return 1.0, view_box
+        ppx = widget_size.width() / view_box.width()
+        ppy = widget_size.height() / view_box.height()
+        return min(ppx, ppy), view_box
+
+    def get_current_image_data(self):
+        """Return the pixel data currently on screen (for contrast/stats)."""
+        return self._current_display_data
 
     def __init__(self, axis_name, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._init_loading()
         if axis_name not in _AXIS_GEOM:
             raise ValueError(f"axis_name must be XY/XZ/YZ, got {axis_name!r}")
         self.axis_name = axis_name
@@ -120,7 +299,7 @@ class OrthoImageView(DynamicImageView):
 
     # ---------- public ----------
 
-    def set_multires_image(self, multires_image, slice_indices=None):
+    def set_dataset(self, multires_image, slice_indices=None):
         self._cancel_pending()
         self.multires_image = multires_image
         self._last_load_params = None
@@ -204,11 +383,6 @@ class OrthoImageView(DynamicImageView):
         self.vLine.setPos(self.slice_indices[self.h_axis] + 0.5)
         self.hLine.setPos(self.slice_indices[self.v_axis] + 0.5)
 
-    def update_crosshair(self, pos_x, pos_y):
-        """Legacy API: place the crosshair at explicit pane coords."""
-        self.vLine.setPos(pos_x)
-        self.hLine.setPos(pos_y)
-
     # ---------- mouse ----------
 
     def _on_mouse_clicked(self, event):
@@ -228,7 +402,6 @@ class OrthoImageView(DynamicImageView):
         idx = list(self.slice_indices)
         idx[self.h_axis] = h
         idx[self.v_axis] = v
-        self.crosshairMoved.emit(h, v)
         self.positionPicked.emit(*idx)
 
     # ---------- rendering ----------

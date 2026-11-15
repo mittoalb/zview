@@ -31,15 +31,17 @@ render = [
     "tifffile",
     "numcodecs>=0.14",
 ]
-napari = ["napari[all]", "dask"]
 docs = ["sphinx>=7", "furo", "myst-parser>=2", "sphinx-copybutton", "sphinx-design"]
 
 [project.scripts]
-zview = "zview.zview2:main"
+zview = "zview.viewer.app:main"
 zview-render = "zview.render.cli:main"
-zview-convert = "zview.convert:main"
-zview-vessels = "zview.vessels.cli:main"
+zview-convert = "zview.tools.convert:main"
+zview-vessels = "zview.tools.vessels.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["zview*"]
 exclude = ["zview.__pycache__*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

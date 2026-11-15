@@ -49,8 +49,7 @@ MAX_LEVELS=6
 # Rendering defaults (override by editing)
 TURNTABLE_FRAMES=180
 SLICE_FRAMES=240
-RENDERING="attenuated_mip"              # mip | attenuated_mip | iso | translucent | additive | average | minip
-COLORMAP="gray_r"
+COLORMAP="gray"
 BUDGET_GB=8                             # memory budget (GB) to pick mip level for render.
                                         # Keep <= GPU VRAM.
 # ---------------------------------------------------------------------------
@@ -116,7 +115,7 @@ fi
 
 say "launching conversion -> $OUT_ZARR"
 # shellcheck disable=SC2086
-"$ENV_PY" -m zview.convert "$SRC_H5" "$OUT_ZARR" \
+"$ENV_PY" -m zview.tools.convert "$SRC_H5" "$OUT_ZARR" \
     --dtype "$OUT_DTYPE" \
     --chunk-size $CHUNK \
     --shard-size $SHARD \
@@ -142,12 +141,10 @@ say "total files in $OUT_ZARR: $total_files"
 # ---------- 5. Render -----------------------------------------------------
 say "launching renders -> $RENDER_DIR"
 export QT_QPA_PLATFORM=offscreen
-"$ENV_PY" -m zview.render napari "$OUT_ZARR" \
-    --batch \
+"$ENV_PY" -m zview.render cpu "$OUT_ZARR" \
     --budget-gb "$BUDGET_GB" \
-    --rendering "$RENDERING" \
-    --colormap "$COLORMAP" \
-    --turntable "$TURNTABLE_FRAMES" \
+    --cmaps "$COLORMAP" \
+    --frames "$TURNTABLE_FRAMES" \
     --slice-sweep "$SLICE_FRAMES" \
     --out "$RENDER_DIR" \
     2>&1 | tee "$LOG_DIR/render.log"

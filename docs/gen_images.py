@@ -63,7 +63,7 @@ def main():
     iso = rp.prepare(a.data / "phantom_iso.zarr", a.work / "iso")
     aniso = rp.prepare(a.data / "phantom_aniso_5d.zarr", a.work / "aniso")
     want = set(a.only or ["hero", "looks", "lighting", "presets", "finish", "surface", "aniso", "tour",
-                          "turntable", "sideviews"])
+                          "turntable", "sideviews", "labels"])
 
     if "hero" in want:
         save_jpg(still(iso, a.work / "hero", ["interior"], ["supersample=2", "zoom=1.25", "elevations=[20]"], size="1600x900"),
@@ -152,6 +152,29 @@ def main():
         dst = IMG / "turntable.gif"
         iio.imwrite(dst, frames, duration=80, loop=0)
         print("  ->", dst.relative_to(ROOT), f"{dst.stat().st_size // 1024} KB")
+
+    if "labels" in want:
+        lbl = rp.prepare(a.data / "phantom_labels.zarr", a.work / "labels")
+        cfg = json.loads(Path(lbl).read_text())
+        # Default classes, then with the bulk matrix and the container wall hidden.
+        save_jpg(still(lbl, a.work / "labels_default", ["labels"], []), IMG / "labels" / "default.jpg")
+        cfg["labels"]["21"]["visible"] = False
+        cfg["labels"]["3"]["visible"] = False
+        Path(lbl).write_text(json.dumps(cfg, indent=2))
+        save_jpg(still(lbl, a.work / "labels_inside", ["labels"], ["zoom=1.15"]), IMG / "labels" / "inside.jpg")
+        out = a.work / "labels_tour"
+        if out.exists():
+            shutil.rmtree(out)
+        ov = cli.rc.parse_set(["tour.speed=0.25", "tour.scroll=10", "tour.region_size=220", "size=960x540",
+                               'regions=[{"name": "Helix", "z": 256, "y": 256, "x": 384}]'])
+        ov["preset"] = "labels"
+        cfg["labels"]["21"]["visible"] = True
+        cfg["labels"]["3"]["visible"] = True
+        Path(lbl).write_text(json.dumps(cfg, indent=2))
+        cli.run(lbl, ["tour"], ov, out)
+        for k in sorted((out / "tour" / "keyframes").glob("*.png")):
+            if "section" in k.stem or "real" in k.stem:
+                save_jpg(k, IMG / "labels" / f"tour_{k.stem.split('_', 1)[1].lower()}.jpg", size=(960, 540))
 
     if "sideviews" in want:
         save_jpg(a.work / "iso" / "side_views_grid.png", IMG / "side_views_grid.jpg", size=(1200, 800))

@@ -3,15 +3,13 @@
 import math
 import os
 import threading
-import time
-import traceback
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 import numpy as np
 
-from zview import _log
-from zview.sysinfo import default_cache_mb, default_io_workers, system_memory
+from zview.core import log as _log
+from zview.core.sysinfo import default_cache_mb, default_io_workers, system_memory
 
 # Chunk-fetch concurrency, sized to the machine (override: ZVIEW_IO_THREADS).
 # zarr/z5py release the GIL during decompression, so threads scale well.
@@ -165,7 +163,6 @@ class MultiResolutionImage:
     def __init__(self, zarr_group, cache_size_mb=None):
         self.zarr_group = zarr_group
         self.levels = []      # Volume3D per level, finest first
-        self.scales = []
         self.transforms = []
         self.axis_names = None
         self.axis_units = None
@@ -263,13 +260,11 @@ class MultiResolutionImage:
                                     translation = [0.0] + list(vals[-2:])
 
                         self.transforms.append({'scale': scale, 'translation': translation})
-                        self.scales.append(scale[-2:])
         except Exception as e:
             _log.warn(f"Could not parse multiscales metadata: {e}")
 
         if not self.levels:
             self.transforms = []
-            self.scales = []
             level_idx = 0
             while str(level_idx) in self.zarr_group:
                 try:
@@ -280,7 +275,6 @@ class MultiResolutionImage:
                     self.levels.append(vol)
                     s0 = self.levels[0].shape
                     sc = [a / b for a, b in zip(s0, vol.shape)]
-                    self.scales.append(sc[-2:])
                     self.transforms.append({'scale': sc, 'translation': [0.0, 0.0, 0.0]})
                     level_idx += 1
                 except Exception as e:
@@ -670,17 +664,80 @@ class MultiResolutionImage:
                 fut.cancel()
         return out
 
-    def get_full_volume(self, level=0, downsample=1):
-        """Whole level as a numpy array (kept for API compatibility)."""
-        if level < 0 or level >= len(self.levels):
-            level = 0
-        _log.info(f"Loading full volume from level {level}, shape {self.levels[level].shape}")
+    @property
+    def labels(self):
+        """LabelTable if this dataset is a label map (detected once), else None."""
+        if not hasattr(self, "_labels"):
+            from zview.core.labels import detect_labels  # noqa: PLC0415
+            try:
+                self._labels = detect_labels(self)
+            except Exception as e:
+                _log.warn(f"label detection failed: {e}")
+                self._labels = None
+            if self._labels is not None:
+                _log.info(f"label map: {len(self._labels.classes)} classes ({self._labels.source})")
+        return self._labels
+
+    @labels.setter
+    def labels(self, table):
+        self._labels = table
+
+    def read_volume_pooled(self, level, factors, rank_lut, progress=None, cancel=None, executor=None,
+                           out_block=64):
+        """Label-aware downsampling of `level` by integer `factors`.
+
+        Like read_volume, but each output voxel is the highest-ranked class in
+        its factor-sized cell (zview.core.labels.pool_labels) instead of one
+        sampled voxel, so small structures survive. Work is split into cubic
+        output blocks of side `out_block`, read in parallel, memory-bounded.
+        """
+        from zview.core.labels import pool_labels  # noqa: PLC0415
+        array = self.levels[level]
+        shape = array.shape
+        fz, fy, fx = (max(1, int(f)) for f in factors)
+        out_shape = tuple(math.ceil(d / f) for d, f in zip(shape, (fz, fy, fx)))
+        out = np.zeros(out_shape, dtype=array.dtype)
+        tasks = [(z, y, x) for z in range(0, out_shape[0], out_block)
+                 for y in range(0, out_shape[1], out_block) for x in range(0, out_shape[2], out_block)]
+        total = len(tasks)
+
+        def _fetch(t):
+            if cancel is not None and cancel.is_set():
+                return t, None
+            z, y, x = t
+            src = array[z * fz:min(shape[0], (z + out_block) * fz),
+                        y * fy:min(shape[1], (y + out_block) * fy),
+                        x * fx:min(shape[2], (x + out_block) * fx)]
+            return t, pool_labels(np.asarray(src), (fz, fy, fx), rank_lut)
+
+        pool = executor or _IO_POOL
+        block_bytes = out_block ** 3 * fz * fy * fx * np.dtype(array.dtype).itemsize * 9  # + int64 ranks
+        _, avail = system_memory()
+        budget = min(1 << 30, int(avail * 0.1)) if avail else 512 << 20
+        max_inflight = max(2, min(getattr(pool, "_max_workers", 4) * 2, budget // max(1, block_bytes)))
+        it, inflight, done = iter(tasks), set(), 0
         try:
-            t0 = time.perf_counter()
-            vol = self.read_volume(level, (downsample,) * 3)
-            _log.info(f"  -> {vol.shape} in {time.perf_counter() - t0:.1f}s")
-            return vol
-        except Exception as e:
-            _log.error(f"Error loading full volume: {e}")
-            traceback.print_exc()
-            return None
+            for t in it:
+                inflight.add(pool.submit(_fetch, t))
+                if len(inflight) >= max_inflight:
+                    break
+            while inflight:
+                finished, _ = wait(inflight, timeout=0.25, return_when=FIRST_COMPLETED)
+                if cancel is not None and cancel.is_set():
+                    raise VolumeReadCancelled()
+                for fut in finished:
+                    inflight.discard(fut)
+                    (z, y, x), data = fut.result()
+                    if data is None:
+                        continue
+                    out[z:z + data.shape[0], y:y + data.shape[1], x:x + data.shape[2]] = data
+                    done += 1
+                    if progress is not None:
+                        progress(done, total)
+                    nxt = next(it, None)
+                    if nxt is not None:
+                        inflight.add(pool.submit(_fetch, nxt))
+        finally:
+            for fut in inflight:
+                fut.cancel()
+        return out

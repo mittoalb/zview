@@ -6,12 +6,12 @@ renderer classes can be imported too, but their interfaces may change.
 ## Reading data
 
 ```{eval-rst}
-.. automodule:: zview.msres
+.. automodule:: zview.core.pyramid
    :members: MultiResolutionImage, Volume3D, ChunkCache
 ```
 
 ```{eval-rst}
-.. autofunction:: zview.io.open_dataset
+.. autofunction:: zview.core.io.open_dataset
 ```
 
 ```{eval-rst}
@@ -23,17 +23,24 @@ Example: read a render-sized volume of any store.
 
 ```python
 from zview.render.sources import open_pyramid
-from zview import sysinfo
+from zview.core import sysinfo
 
 mi = open_pyramid("/data/sample/rec.zarr")
 plan = sysinfo.plan_volume([l.shape for l in mi.levels], sysinfo.volume_budget(quality="medium"))
 vol = mi.read_volume(plan.level, plan.stride)          # numpy (z, y, x)
 ```
 
+## Label maps
+
+```{eval-rst}
+.. automodule:: zview.core.labels
+   :members: LabelTable, LabelClass, detect_labels, build_table, pool_labels, render_codes
+```
+
 ## Machine capabilities
 
 ```{eval-rst}
-.. automodule:: zview.sysinfo
+.. automodule:: zview.core.sysinfo
    :members: volume_budget, plan_volume, VolumeBudget, VolumePlan, GLCaps, system_memory, cpu_count,
              default_io_workers, default_cache_mb, apply_gl_compat
 ```

@@ -1,4 +1,3 @@
-# Moved from zarr-auto-render/render_tour.py.
 """Guided 3D tour video of a tomography volume (VTK, GPU, volumetric shadows).
 
 Storyboard:
@@ -12,24 +11,22 @@ Storyboard:
   4. outro          - the rest of the turn
 
 Needs a display (DISPLAY set) and VTK. The overview uses the cached .npy from
-prepare3d.py; the close-ups read full-resolution slices from the HDF5 or Zarr.
-Usually run through pipeline3d.py with a dataset.json.
+zview-render prepare; the close-ups read full-resolution slices from the source
+(Zarr / N5 / HDF5 / TIFF). Run it with:
 
-    python render_tour.py volume_step8.npy --factor 8 --h5 rec.h5 --out tour \\
-        --z-range 1700 13800 --cylinder 6186 5931 6270 6267 5270 --pixel-size 1.88 \\
+    zview-render run DIR/render.json tour
         --region cerebellum 3800 6144 4200 --region hippocampus 6600 2500 6144
 """
 
 import argparse
 import os
-import sys
 import time
 from multiprocessing import Pool
 from pathlib import Path
 
 import numpy as np
-from zview.render import vtk_render as rv                                            # noqa: E402
-from zview.render.vtk_render import log                                         # noqa: E402
+from zview.render import scene as rv                                            # noqa: E402
+from zview.render.scene import log                                         # noqa: E402
 
 _H5 = {}
 
@@ -66,13 +63,21 @@ def read_slices(h5, dset, zs, yc, xc, hh, ww, workers):
     return np.stack(sl), (y0, x0)
 
 
+_LABEL_LUT = None     # set for label maps: (N, 3) uint8 colour per label value
+
+
 def real_frame(sl, lo, hi, W, H, zoom):
-    """A native slice as a grey RGB frame (no smoothing / colouring), centre zoom."""
+    """A native slice as an RGB frame (grey, or class colours for label maps), centre zoom."""
     from PIL import Image
     hh, ww = sl.shape
     ch, cw = int(hh / zoom), int(ww / zoom)
     oy, ox = (hh - ch) // 2, (ww - cw) // 2
-    g = np.clip((sl[oy:oy + ch, ox:ox + cw] - lo) / max(hi - lo, 1e-12), 0, 1)
+    crop = sl[oy:oy + ch, ox:ox + cw]
+    if _LABEL_LUT is not None:
+        idx = np.clip(crop.astype(np.int64), 0, len(_LABEL_LUT) - 1)
+        pil = Image.fromarray(_LABEL_LUT[idx]).resize((W, H), Image.NEAREST)
+        return np.asarray(pil), H / ch
+    g = np.clip((crop - lo) / max(hi - lo, 1e-12), 0, 1)
     pil = Image.fromarray((g * 255).astype(np.uint8)).resize((W, H), Image.LANCZOS).convert("RGB")
     return np.asarray(pil), H / ch                                       # px per full-res voxel
 
@@ -180,12 +185,16 @@ def main(argv=None):
     keyd = out / "keyframes"; keyd.mkdir(exist_ok=True)
 
     vol = rv.prepare_volume(args)
+    global _LABEL_LUT
+    if vol.get("label_table") is not None:
+        t = vol["label_table"]
+        _LABEL_LUT = t.lut_rgba(max(256, max(t.values) + 1))[:, :3]
     F, Z0 = vol["F"], vol["z0"]
     if args.style == "surface":
         from zview.render import surface as rs
         sc = rs.SurfaceScene(vol["U8"], args, W, H)
     else:
-        sc = rv.Scene(vol["U8"], args, W, H)
+        sc = rv.Scene(vol["U8"], args, W, H, labels=vol.get("labels"))
     del vol
     dist0 = sc.default_dist()
     c0 = sc.center

@@ -3,10 +3,11 @@
 A viewer and renderer for large multi-resolution 3D volumes: Zarr (v2 and
 v3) and N5, plus HDF5 and TIFF stacks for rendering.
 
-- **`zview`**: an interactive viewer (PyQt5 + pyqtgraph + VisPy) with
-  chunk-aligned, parallel, asynchronous loading, automatic pyramid-level
-  selection, linked orthogonal views, and a low-resolution 3D view sized to
-  the machine.
+- **`zview`**: an interactive viewer (PyQt5 + pyqtgraph) with chunk-aligned,
+  parallel, asynchronous loading, automatic pyramid-level selection, linked
+  orthogonal views, label-map support (segmentations shown as classes), and a
+  3D view sized to the machine: VTK with the renderer's looks and lighting, or
+  a fast VisPy fallback.
 - **`zview-render`**: an offline, preset-driven 3D renderer (VTK) for
   presentation-quality stills, turntables, guided tour videos and lit
   surfaces, with curated looks, lighting rigs, volumetric shadows, filmic tone
@@ -158,18 +159,29 @@ zview /tmp/zview_fake/phantom_iso.zarr --layout quad
 
 ```
 zview/
-  zview2.py     Main window (UnifiedZarrViewer): layouts, controls dock, menus
-  oview.py      OrthoImageView — XY/XZ/YZ pane with crosshair + click-to-sync
-  sview.py      DynamicImageView — base pane: async chunk-aligned lazy loading
-  view3d.py     VolumeLoader (budgeted background reads) + Volume3DView (VisPy)
-  msres.py      MultiResolutionImage, Volume3D adapter, ChunkCache, parallel I/O
-  sysinfo.py    CPU/RAM/GPU probing, cache/thread defaults, 3D budget + planner
-  theme.py      Plane colours shared by headers, crosshairs and 3D outlines
-  meta.py       Zarr metadata extractor + viewer widget
+  core/            data access + machine capabilities (no Qt)
+    pyramid.py     MultiResolutionImage, Volume3D adapter, ChunkCache, parallel/pooled reads
+    labels.py      label maps: detection, class tables, label-aware pooling
+    io.py          open Zarr v2/v3 (zarr-python) and N5 (z5py)
+    sysinfo.py     CPU/RAM/GPU probing, cache/thread defaults, 3D budget + planner
+    log.py         small coloured logger
+  viewer/          the Qt viewer (zview)
+    app.py         main window, layouts, controls dock, menus, `main`
+    panes.py       SlicePane: XY/XZ/YZ with async lazy loading, crosshair, picking
+    loader.py      VolumeLoader: budgeted background 3D reads (shared by both 3D engines)
+    volume_vtk.py  high-quality 3D pane (VTK, off-screen, progressive)
+    volume_vispy.py fast fallback 3D pane (VisPy)
+    render_dialog.py File > Render 3D…, job-script export
+    metadata.py, theme.py
+  render/          offline renderer (zview-render), no Qt
+    cli.py config.py looks.py scene.py prepare.py sources.py surface.py tour.py cpu.py
+  tools/           zview-convert (convert.py), zview-vessels (vessels/)
 scripts/
-  make_test_zarr.py       Generate a 6-level OME-NGFF alignment test pyramid
-  make_fake_datasets.py   Generate the full fake-data suite (all features)
-pyproject.toml, environment.yml
+  make_fake_datasets.py   fake-data suite (incl. a label map)
+  make_test_zarr.py       alignment test pyramid
+  pipeline/               unattended convert + render launchers
+tests/             pytest suite (no display needed)
+docs/              Sphinx documentation (Read the Docs)
 ```
 
 ## Current known limitations

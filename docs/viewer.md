@@ -105,13 +105,36 @@ flip between levels: there is a one-octave dead zone around the current level.
 
 ## The 3D pane
 
-The 3D pane renders a low-resolution copy of the volume with VisPy. Its size
-is chosen for the machine (see [](performance.md#3d-budget)): on an 11 GB GPU
-that is up to 1024³, and 256³ on a software renderer. If even the coarsest
-pyramid level is too big, the level is read with a stride. A small preview
-appears first when that is much cheaper to read. The quality menu (Auto,
-Preview, Low, Medium, High, Max) overrides the budget, **✕** cancels a load,
-and the tooltip on the status line explains which limit applied.
+The 3D pane renders a copy of the volume sized for the machine (see
+[](performance.md#3d-budget)): on an 11 GB GPU up to 1024³, and 256³ on a
+software renderer. If even the coarsest pyramid level is too big, the level is
+read with a stride (with [label-aware pooling](labels.md) for label maps). A
+small preview appears first when that is much cheaper to read. The quality
+menu (Auto, Preview, Low, Medium, High, Max) overrides the budget, **✕**
+cancels a load, and the tooltip on the status line explains which limit
+applied.
+
+There are two engines (**View › 3D engine**, applied on restart):
+
+VTK, high quality (the default when VTK is installed)
+: The same rendering as `zview-render`: [looks, lighting rigs](rendering/looks.md),
+  volumetric shadows, opacity curves and the filmic finish. The toolbar holds
+  the **preset**, **look** and **lighting** menus. **⚙** opens the intensity
+  window, opacity, shadow strength, ray step, smoothing, box, slice planes and
+  background. Rendering is progressive: a draft frame while you drag, then
+  full quality, then 2× supersampling once you pause.
+  Drag rotates, Shift+drag pans, Ctrl+drag rolls, the wheel zooms and a
+  double-click resets. **📷** saves a still of the current view at any size,
+  and **▶ job** opens [Render 3D…](rendering/dialog.md) with this pane's look,
+  window and camera.
+
+VisPy, fast and minimal
+: MIP / attenuated MIP / MinIP / translucent / additive / average /
+  isosurface with a colormap, contrast and gamma. It needs no VTK.
+
+VTK renders off-screen (preferring EGL on the GPU), and the frames are drawn in
+the pane, so it works the same on any driver, without a GL window embedded in
+Qt.
 
 ```{image} _static/img/ui/quad_aniso.jpg
 :class: shot

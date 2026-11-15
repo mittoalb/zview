@@ -31,8 +31,11 @@ DEFAULTS = {
     "outputs": ["stills", "turntable"],   # stills, turntable, tour, surface
 
     # --- preprocessing
-    "preprocess": "none",      # none (any data) | tomo (sample in a tube: medium removal, wall fit)
+    "preprocess": "none",      # none (any data) | tomo (sample in a tube) | labels (segmentation / class IDs)
+    "labels": None,            # label maps: {value: {name, color, opacity, visible}} (default: from metadata)
+    "label_smooth": 1.0,       # label maps: shading smoothness (voxels)
     "window": None,            # percentile | otsu (default: percentile for none, otsu for tomo)
+    "window_values": None,     # [lo, hi] absolute window (overrides lo_pct/hi_pct; preprocess none)
     "lo_pct": 1.0,
     "hi_pct": 99.8,
     "z_range": None,           # [Z0, Z1] full-res slices to keep
@@ -67,6 +70,7 @@ DEFAULTS = {
     "zoom": 1.0,               # camera zoom for stills/turntable (>1 = closer)
     "elevations": None,        # still elevations (default: elev, 45, -20, 0)
     "azimuths": 8,
+    "azimuth": 0.0,            # start azimuth of stills / turntable (degrees)
 
     # --- text overlays (tour / surface)
     "title": "",
@@ -99,6 +103,9 @@ PRESETS = {
     # Metallic / mineral grains.
     "metal": dict(preprocess="none", smooth=0.8, window="percentile", lo_pct=93.0, hi_pct=99.95,
                   look="gold", lighting="studio"),
+    # Label maps (segmentations): class colours from the metadata, background
+    # hidden, bulk classes as faint glass, smooth per-class shading.
+    "labels": dict(preprocess="labels", look="bone", lighting="soft", label_smooth=1.0),
     # X-ray-like projection look.
     "xray": dict(preprocess="none", look="xray", curve="glass", lighting="flat", scatter=0.0,
                  tone_mapping="none", exposure=1.6),
@@ -122,6 +129,7 @@ PRESET_HELP = {
     "multiphase": "translucent low phase + opaque dense phase",
     "metal": "metallic grains, dramatic light",
     "xray": "flat X-ray-like look",
+    "labels": "label maps / segmentations: per-class colours, background hidden",
     "tomo-brain": "original pipeline: sample in a container (medium removal, wall fit)",
     "tomo-surface": "tomo-brain as a lit surface with ambient occlusion",
     "draft": "modifier: small and fast",
@@ -199,6 +207,8 @@ def effective(cfg, overrides=None):
 def load(path):
     path = Path(path)
     cfg = json.loads(path.read_text())
+    if "cmap" in cfg and cfg.get("look") is None:     # zarr-auto-render dataset.json
+        cfg["look"] = cfg.pop("cmap")
     # Relative paths in a config are relative to the config file.
     for key in ("volume", "source"):
         v = cfg.get(key)
@@ -257,6 +267,12 @@ def common_argv(c):
         a += ["--z-range", *[str(int(v)) for v in c["z_range"]]]
     if c.get("cylinder"):
         a += ["--cylinder", *[str(v) for v in c["cylinder"]]]
+    if c.get("preprocess") == "labels":
+        a += ["--label-smooth", str(c.get("label_smooth", 1.0))]
+        if c.get("labels"):
+            a += ["--labels-json", json.dumps(c["labels"])]
+    if c.get("window_values"):
+        a += ["--window-values", *[str(v) for v in c["window_values"]]]
     if c.get("voxel_size_um"):
         a += ["--voxel-size", *[str(v) for v in c["voxel_size_um"]]]
     if not c.get("keep_largest"):
@@ -267,7 +283,7 @@ def common_argv(c):
 def turntable_argv(c, out, stills=True, turntable=True):
     a = common_argv(c) + ["--out", str(out), "--frames", str(c["frames"] if turntable else 0),
                           "--elev", str(c["elev"]), "--azimuths", str(c["azimuths"]),
-                          "--zoom", str(c.get("zoom") or 1.0)]
+                          "--zoom", str(c.get("zoom") or 1.0), "--azimuth", str(c.get("azimuth") or 0.0)]
     if c.get("elevations"):
         a += ["--elevations", *[str(v) for v in c["elevations"]]]
     if not stills:

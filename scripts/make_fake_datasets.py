@@ -145,6 +145,24 @@ class Phantom:
 
     # ---------------------------------------------------------- render
 
+    LABELS = {3: "matrix", 5: "dense grain", 7: "pore", 9: "marker cube", 13: "resolution target",
+              21: "container wall", 50: "helix", 70: "vessel lumen", 255: "void (outside the sample)"}
+
+    def render_labels(self, origin, shape, voxel):
+        """uint8 class IDs for the block (see LABELS); 255 = outside."""
+        self._lab = np.full(shape, 255, np.uint8)
+        self._labelling = True
+        try:
+            self.render(origin, shape, voxel)
+        finally:
+            self._labelling = False
+        return self._lab
+
+    def _mark(self, sl, alpha, cls):
+        if getattr(self, "_labelling", False):
+            view = self._lab[sl] if sl is not None else self._lab
+            view[np.broadcast_to(alpha, view.shape) > 0.5] = cls
+
     def render(self, origin, shape, voxel):
         """Float32 block for level-0 voxel indices origin..origin+shape."""
         (z0, y0, x0), (nz, ny, nx), (vz, vy, vx) = origin, shape, voxel
@@ -163,8 +181,10 @@ class Phantom:
                       + 2500 * np.sin(6 * np.pi * X / Lx) * np.sin(4 * np.pi * Y / Ly)
                       * np.cos(2 * np.pi * Z / Lz))
             vol = vol * (1 - inside) + matrix * inside
+            self._mark(None, inside, 3)
             shell = _smooth(np.minimum(self.wall / 2 - np.abs(rad - self.R + self.wall / 2), zin), w)
             vol = vol * (1 - shell) + 20000 * shell
+            self._mark(None, shell, 21)
         else:
             vol = vol * (1 - inside) + 3000 * inside
 
@@ -184,7 +204,9 @@ class Phantom:
                 if sl is None:
                     continue
                 d = np.sqrt((Z[sl[0]] - c[0]) ** 2 + (Y[:, sl[1]] - c[1]) ** 2 + (X[..., sl[2]] - c[2]) ** 2)
-                blend(sl, _smooth(r - d, w), val)
+                a = _smooth(r - d, w)
+                blend(sl, a, val)
+                self._mark(sl, a, 7 if val < 5000 else 5)
 
             # Resolution target: x bars with periods given in level-0 voxels.
             m = min(Lx, Ly)
@@ -205,6 +227,7 @@ class Phantom:
                 a = zm[:, None, None] * ym[None, :, None] * bars[None, None, :]
                 a = a * _smooth(self.R - self.wall - rad, w)          # stay inside the container
                 vol = vol * (1 - a) + 40000 * a
+                self._mark(None, a, 13)
 
         for pts, r, val in self.curves:
             lo = np.array([z0 * vz, y0 * vy, x0 * vx]) - r - w
@@ -220,6 +243,7 @@ class Phantom:
                 d = np.sqrt((Z[sl[0]] - c[0]) ** 2 + (Y[:, sl[1]] - c[1]) ** 2 + (X[..., sl[2]] - c[2]) ** 2)
                 np.maximum(alpha[sl], _smooth(r - d, w), out=alpha[sl])
             vol = vol * (1 - alpha) + val * alpha
+            self._mark(None, alpha, 50 if val == 47000.0 else 70)
 
         if not self.vessels_only:
             for c, half, val in self.cubes:
@@ -229,8 +253,12 @@ class Phantom:
                 d = np.minimum.reduce([half - np.abs(Z[sl[0]] - c[0]) + 0 * Y[:, sl[1]] + 0 * X[..., sl[2]],
                                        half - np.abs(Y[:, sl[1]] - c[1]) + 0 * Z[sl[0]] + 0 * X[..., sl[2]],
                                        half - np.abs(X[..., sl[2]] - c[2]) + 0 * Z[sl[0]] + 0 * Y[:, sl[1]]])
-                blend(sl, _smooth(d, w), val)
+                a = _smooth(d, w)
+                blend(sl, a, val)
+                self._mark(sl, a, 9)
 
+        if getattr(self, "_labelling", False):
+            return vol
         if self.noise > 0:
             rng = np.random.default_rng((self.seed, z0, y0, x0, int(self.vessels_only)))
             vol += rng.standard_normal(vol.shape, dtype=np.float32) * self.noise
@@ -262,7 +290,10 @@ def _open(path):
 
 def _render_task(args):
     path, lead, phantom, origin, shape, voxel, dtype = args
-    data = _convert(phantom.render(origin, shape, voxel), dtype)
+    if dtype == "labels":
+        data = phantom.render_labels(origin, shape, voxel)
+    else:
+        data = _convert(phantom.render(origin, shape, voxel), dtype)
     arr = _open(path)
     if arr.ndim == 2:                      # 2D image: single slice
         arr[origin[1]:origin[1] + shape[1], origin[2]:origin[2] + shape[2]] = data[0]
@@ -275,6 +306,12 @@ def _render_task(args):
 def _down_task(args):
     src_path, dst_path, lead, out_origin, out_shape, factors = args
     src, dst = _open(src_path), _open(dst_path)
+    if dst.dtype == np.uint8 and getattr(dst, "attrs", {}).get("zview_stride_labels"):
+        # Label pyramid: stride-2 subsampling (like many segmentation tools).
+        lo = [o * f for o, f in zip(out_origin, factors)]
+        blk = np.asarray(src[lead + tuple(slice(a, a + s * f, f) for a, s, f in zip(lo, out_shape, factors))])
+        dst[lead + tuple(slice(o, o + b) for o, b in zip(out_origin, blk.shape))] = blk
+        return blk.nbytes
     nd = len(factors)
     src_sp = src.shape[-nd:]
     lo = [o * f for o, f in zip(out_origin, factors)]
@@ -351,16 +388,19 @@ def write_pyramid(pool, path, *, shape, chunks, dtype, phantom, voxel, levels,
         shapes.append(tuple(max(1, math.ceil(s / k)) for s, k in zip(shapes[-1], f)))
 
     arrays = []
+    store_dtype = "uint8" if dtype == "labels" else dtype
     for i, shp in enumerate(shapes):
         ch = tuple(min(c, s) for c, s in zip(chunks, shp))
         arr = root.create_array(str(i), shape=tuple(lead_shape) + shp,
-                                chunks=(1,) * len(lead_shape) + ch, dtype=dtype,
+                                chunks=(1,) * len(lead_shape) + ch, dtype=store_dtype,
                                 fill_value=fill_value)
+        if dtype == "labels":
+            arr.attrs["zview_stride_labels"] = True
         arrays.append(str(path / str(i)))
         _ = arr
 
     leads = list(np.ndindex(*lead_shape)) if lead_shape else [()]
-    print(f"  {path.name}: level 0 {tuple(lead_shape) + shapes[0]} {np.dtype(dtype).name}")
+    print(f"  {path.name}: level 0 {tuple(lead_shape) + shapes[0]} {dtype}")
     sp3 = shapes[0] if nd == 3 else (1,) + shapes[0]
     ch3 = chunks if nd == 3 else (1,) + tuple(chunks)
     tasks = []
@@ -488,6 +528,16 @@ def main():
         a0 = zarr.open_array(str(p / "0"), mode="r+")
         a0[90:100, 40:200, 40:200] = np.nan
         print("    + NaN slab at z=90..99 (level 0 only)")
+
+        # 4b. Label map (segmentation): class IDs with a lookup table, 255 = void,
+        # stride-subsampled pyramid — the layout many segmentation tools write.
+        n = 256 if q else 512
+        p = out / "phantom_labels.zarr"
+        write_pyramid(pool, p, shape=(n, n, n), chunks=(64, 64, 64), dtype="labels",
+                      phantom=Phantom((n, n, n), seed=1), voxel=(1.0, 1.0, 1.0), levels=4 if q else 5,
+                      fill_value=255)
+        zarr.open_group(str(p), mode="r+").attrs["lookup"] = {str(k): v for k, v in Phantom.LABELS.items()}
+        print("    + lookup table (class names)")
 
         # 5. Numbered levels, no metadata (Zarr v2).
         write_pyramid(pool, out / "numbered_no_metadata.zarr", shape=(128, 128, 128), chunks=(64, 64, 64),

@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from PyQt5 import QtCore, QtWidgets  # noqa: E402
 
-from zview.zview2 import UnifiedZarrViewer, apply_dark_theme  # noqa: E402
+from zview.viewer.app import MainWindow, apply_dark_theme  # noqa: E402
 
 
 def main():
@@ -34,7 +34,7 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv[:1])
     apply_dark_theme(app)
-    v = UnifiedZarrViewer()
+    v = MainWindow()
     v.resize(1600, 950)
     v.show()
 
@@ -64,7 +64,10 @@ def main():
         v.open_path(str(a.data / "phantom_iso.zarr"))
         wait_3d()
         v.set_position(300, 330, 180)
-        pump(3)
+        w = v.view_3d
+        if hasattr(w, "preset_combo"):
+            w._on_preset(w.preset_combo.findData("interior"))
+        pump(5)
         shot(v, "quad")
 
         v.set_layout("dual")
@@ -83,9 +86,12 @@ def main():
         v.set_layout("3d")
         pump(2)
         w = v.view_3d_only
-        w.mode_combo.setCurrentIndex(w.mode_combo.findData("translucent"))
-        w.cmap_combo.setCurrentIndex(w.cmap_combo.findText("viridis"))
-        pump(3)
+        if hasattr(w, "preset_combo"):                # VTK pane
+            w._on_preset(w.preset_combo.findData("interior"))
+        else:                                         # VisPy pane
+            w.mode_combo.setCurrentIndex(w.mode_combo.findData("translucent"))
+            w.cmap_combo.setCurrentIndex(w.cmap_combo.findText("viridis"))
+        pump(5)
         shot(v, "view3d")
 
         v.set_layout("quad")
@@ -94,6 +100,22 @@ def main():
         pump(3)
         shot(v, "quad_aniso")
 
+        # Label map: class colours in 2D, per-class 3D with the class panel.
+        v.set_layout("quad")
+        v.open_path(str(a.data / "phantom_labels.zarr"))
+        wait_3d()
+        pump(3)
+        shot(v, "quad_labels")
+        v.set_layout("3d")
+        w3 = v.view_3d_only
+        if hasattr(w3, "classes_table") and v.loader.result is not None:
+            for val in (21, 3):                       # hide the wall and the matrix
+                if val in v.loader.result.labels.classes:
+                    w3._set_class(val, visible=False)
+            pump(5)
+        shot(v, "view3d_labels")
+
+        v.set_layout("quad")
         v.open_path(str(a.data / "phantom_iso.zarr"))
         pump(2)
         v.set_position(256, 256, 384)

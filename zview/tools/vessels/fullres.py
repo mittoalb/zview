@@ -1,7 +1,6 @@
-# Moved from zarr-auto-render/vessels_fullres.py.
 """Whole-brain blood-vessel segmentation at FULL resolution (headless, many cores).
 
-    python vessels_fullres.py DIR/dataset.json --zarr /path/rec.zarr --out /path/vessels.zarr
+    zview-vessels fullres DIR/render.json --zarr /path/rec.zarr --out /path/vessels.zarr
 
 Vessels are fine dark tubes (empty lumens). Per 512^3 tile of the Zarr full-resolution
 level (aligned with the output shards, so every tile is one output file):
@@ -18,17 +17,16 @@ level (aligned with the output shards, so every tile is one output file):
 Output: OME-style Zarr v3, level 0 = full-res uint8 mask (0/1), levels 1..3 = max-pooled
 (a voxel is 1 if any vessel voxel is inside) for rendering. Then render with:
 
-    python vessels_render.py /path/vessels.zarr --config DIR/dataset.json --level 3 --out DIR/vessels_video
+    zview-vessels render /path/vessels.zarr --config DIR/render.json --level 3 --out DIR/vessels_video
 
-Needs: dataset.json from prepare3d.py (cut, z-range, cached volume) and the Zarr from
-h5_to_zarr.py. No display needed. Write --out to a disk nothing else cleans up; finished tiles
+Needs: render.json from zview-render prepare (cut, z-range, cached volume) and the Zarr from
+zview-convert. No display needed. Write --out to a disk nothing else cleans up; finished tiles
 are logged in OUT.progress so an interrupted run continues with --resume.
 """
 
 import argparse
 import json
 import os
-import sys
 import time
 from multiprocessing import Pool
 from pathlib import Path
@@ -116,8 +114,8 @@ def _pool_shard(job):
 # ---------------------------------------------------------------------------
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("config", type=Path, help="dataset.json (cut, z-range, cached volume)")
-    p.add_argument("--zarr", type=Path, required=True, help="multiscale Zarr from h5_to_zarr.py")
+    p.add_argument("config", type=Path, help="render.json (cut, z-range, cached volume)")
+    p.add_argument("--zarr", type=Path, required=True, help="multiscale Zarr (e.g. from zview-convert)")
     p.add_argument("--out", type=Path, required=True, help="output vessel-mask Zarr (TB-scale disk not needed: "
                                                            "it compresses to a few % of the data)")
     p.add_argument("--low", type=float, default=0.40, help="hysteresis low threshold on darkness (default 0.40)")
@@ -137,7 +135,7 @@ def main(argv=None):
 
     import zarr
     from zarr.codecs import BloscCodec
-    from zview.render import vtk_render as rv
+    from zview.render import scene as rv
     root = zarr.open_group(str(args.zarr), mode="r")
     L0, L3 = root["0"], root["3"]
     nz, ny, nx = L0.shape

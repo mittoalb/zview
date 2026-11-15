@@ -53,6 +53,8 @@ cancels. Datasets with 5–6 pyramid levels load in seconds.
 | `ZVIEW_3D_MAX_VOXELS` | Total texel budget for the viewer's 3D texture (RAM and VRAM limits still apply). |
 | `ZVIEW_NO_TRANSLATION` | `1` ignores OME-NGFF per-level translations (for datasets that write them in a non-standard way). |
 | `ZVIEW_NO_GL_COMPAT` | `1` disables the PyOpenGL library fix-up (see [](troubleshooting.md)). |
+| `ZVIEW_VTK_OFFSCREEN` | `egl` or `default`: off-screen VTK window kind (default: EGL on VTK ≥ 9.7, else GLX). |
+| `ZVIEW_VTK_LABELMASK` | `1`/`0`: force per-class shaded label rendering on or off. |
 
 ## Authoring data for speed
 

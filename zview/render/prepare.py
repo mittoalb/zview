@@ -1,19 +1,20 @@
-# Moved from zarr-auto-render/prepare3d.py.
-"""Step 1 of the 3D pipeline: prepare a dataset (HDF5 or Zarr) for rendering.
+"""Prepare any volume for rendering: a render-sized copy + a config.
 
-    python prepare3d.py SOURCE --out DIR [--step 8] [--pixel-size 1.88]
+    zview-render prepare SOURCE --out DIR [--preset P] [--max-axis 768 | --step 8]
 
-SOURCE is a tomography .h5/.hdf5 (3-D dataset) or a multiscale .zarr
-(OME-Zarr from h5_to_zarr.py). Writes into DIR:
+SOURCE is a Zarr (v2/v3) or N5 store, an HDF5 file or a folder of TIFF
+slices. Writes into DIR:
 
-  volume_step<S>.npy     downsampled uint16 volume (1/S per axis) used for 3D renders
-  side_views_grid.png    XZ + YZ sections with a full-resolution pixel grid; read the
-                         container walls, top (meniscus) and floor off it
-  dataset.json           settings for pipeline3d.py; edit z_range / cylinder / regions
-                         / title / credit, then run:  python pipeline3d.py DIR/dataset.json
+  volume_max<N>.npy / volume_step<S>.npy   the cached volume used for rendering
+  side_views_grid.png    XZ + YZ sections with a full-resolution pixel grid
+                         (read z_range / cylinder / tour regions off it)
+  render.json            the render config; edit it, then
+                         zview-render run DIR/render.json
 
-HDF5: only every S-th slice and every S-th row are read (averaged along X), so even
-multi-TB files take minutes. Zarr: the pyramid level with step S is copied directly.
+Zarr/N5: the finest pyramid level that fits --max-axis plus a stride, read
+in parallel (label maps with label-aware pooling). HDF5: every S-th slice and
+row (averaged along X), so even multi-TB files take minutes. TIFF: every
+S-th slice, averaged S x S in-plane.
 """
 
 import argparse
@@ -115,11 +116,11 @@ def _pick_zarr_plan(mi, max_axis=None, step=None):
     """(level, stride, factor_zyx) for the cached volume.
 
     max_axis: finest pyramid level whose largest side fits, plus a per-axis
-    stride if even the coarsest is too big (zview.sysinfo.plan_volume).
+    stride if even the coarsest is too big (zview.core.sysinfo.plan_volume).
     step: the old fixed-step behaviour — level whose downsample is closest to
     `step`, plus an integer stride to make up the rest.
     """
-    from zview.sysinfo import VolumeBudget, plan_volume
+    from zview.core.sysinfo import VolumeBudget, plan_volume
     shapes = [lvl.shape for lvl in mi.levels]
     if step:
         lvl = min(range(len(shapes)), key=lambda i: abs(mi.level_downsample(i)[2] - step))
@@ -148,20 +149,28 @@ def prepare_zarr(src, out_npy, max_axis=None, step=None, workers=None):
             last[0] = time.time()
             print(f"  {done}/{total} blocks  {time.time() - t:.0f}s", flush=True)
 
-    vol = mi.read_volume(lvl, stride, progress=prog)
+    table = mi.labels
+    if table is not None and tuple(stride) != (1, 1, 1):
+        print("label map: label-aware downsampling (rare classes kept)", flush=True)
+        vol = mi.read_volume_pooled(lvl, stride, table.priority_lut(), progress=prog)
+    else:
+        vol = mi.read_volume(lvl, stride, progress=prog)
     tmp = str(out_npy) + ".partial.npy"
     np.save(tmp, vol)
     os.replace(tmp, out_npy)
     vs = mi.voxel_size()
-    return dict(full_shape=list(mi.levels[0].shape), factor=factor, voxel_size=list(vs),
+    info = dict(full_shape=list(mi.levels[0].shape), factor=factor, voxel_size=list(vs),
                 pixel_size=vs[2], level=lvl, stride=list(stride))
+    if table is not None:
+        info["labels"] = table.to_config()
+    return info
 
 
 def prepare_tiff(src, out_npy, S, workers):
     """Every S-th slice of a TIFF folder, block-averaged S x S in-plane."""
     from concurrent.futures import ThreadPoolExecutor
     import tifffile
-    from zview.convert import TiffStack
+    from zview.tools.convert import TiffStack
     st = TiffStack(src)
     nz, ny, nx = st.shape
     zs = list(range(0, nz, S))
@@ -180,7 +189,8 @@ def prepare_tiff(src, out_npy, S, workers):
         for k, _ in enumerate(ex.map(one, range(len(zs)))):
             if (k + 1) % 100 == 0 or k + 1 == len(zs):
                 print(f"  {k + 1}/{len(zs)} slices  {time.time() - t:.0f}s", flush=True)
-    m.flush(); del m
+    m.flush()
+    m = None              # close the memmap before renaming
     os.replace(str(out_npy) + ".partial.npy", out_npy)
     return dict(full_shape=[nz, ny, nx], factor=S)
 
@@ -281,6 +291,7 @@ def prepare(source, out, preset=None, max_axis=None, step=None, dataset=None, pi
         "pixel_size_um": pixel_size or info.get("pixel_size") or 1.0,
         "voxel_size_um": vs if vs and len(set(vs)) > 1 else None,
         "outputs": None,
+        **({"preset": "labels", "preprocess": "labels", "labels": info["labels"]} if info.get("labels") else {}),
         "title": "", "subtitle": "", "credit": "",
         "z_range": None, "cylinder": None, "regions": [],
         "look": None, "lighting": None, "size": None,

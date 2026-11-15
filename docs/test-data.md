@@ -28,6 +28,7 @@ multi-GB volume uses little memory. Defaults: about 30 s and 2 GB on disk;
 | `phantom_aniso_5d.zarr` | Zarr v3, `(1, 2, 128, 768, 768)` uint16, OME-NGFF 0.5 | `t`/`c` axes, 4:1 voxel anisotropy, z kept at full resolution in the first levels; channel 1 holds only the vessels |
 | `phantom_ngff_centered.zarr` | Zarr v3, 256³ | Standard pixel-centre per-level translations; levels must not jump when you zoom across a change |
 | `phantom_v2_float32.zarr` | Zarr v2, float32 | Negative values and a slab of NaNs |
+| `phantom_labels.zarr` | Zarr v3, uint8 512³, 5 levels | A **label map** of the same phantom (matrix, grains, pores, wall, vessels, helix, markers; 255 = void) with a `lookup` table and a stride-subsampled pyramid |
 | `phantom.n5` | N5 (z5py) | The N5 backend; numbered levels without metadata |
 | `numbered_no_metadata.zarr` | Zarr v2 | Level discovery without attributes |
 | `image_2d.zarr` | Zarr v3, 4096² uint8 | A 2D image as a one-slice volume |

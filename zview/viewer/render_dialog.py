@@ -95,6 +95,11 @@ class RenderDialog(QtWidgets.QDialog):
         self.setWindowTitle("Render 3D")
         self.resize(980, 860)
         self._build()
+        mi = getattr(viewer, "multires_image", None)
+        if mi is not None and getattr(mi, "labels", None) is not None:
+            i = self.preset_combo.findData("labels")
+            if i >= 0:
+                self.preset_combo.setCurrentIndex(i)
         self._load_preset_values()
         self._init_python()
 
@@ -188,6 +193,7 @@ class RenderDialog(QtWidgets.QDialog):
         self.pre_combo = QtWidgets.QComboBox()
         self.pre_combo.addItem("none — window intensities (any data)", "none")
         self.pre_combo.addItem("tomo — sample in a container (medium removal, wall fit)", "tomo")
+        self.pre_combo.addItem("labels — segmentation / class IDs", "labels")
         f.addRow("Preprocess:", self.pre_combo)
         row = QtWidgets.QHBoxLayout()
         self.lo_spin, self.hi_spin = QtWidgets.QDoubleSpinBox(), QtWidgets.QDoubleSpinBox()
@@ -293,6 +299,10 @@ class RenderDialog(QtWidgets.QDialog):
         self.save_btn.clicked.connect(self._save_only)
         self.copy_btn = QtWidgets.QPushButton("Copy command")
         self.copy_btn.clicked.connect(self._copy_command)
+        self.script_btn = QtWidgets.QPushButton("Save script…")
+        self.script_btn.setToolTip("Write a standalone Python script that runs this render in the background "
+                                   "(e.g. on a GPU node, at a finer volume size, with nohup)")
+        self.script_btn.clicked.connect(self._save_script)
         self.preset_btn = QtWidgets.QPushButton("Save as preset…")
         self.preset_btn.clicked.connect(self._save_preset)
         self.open_btn = QtWidgets.QPushButton("Open output folder")
@@ -301,17 +311,19 @@ class RenderDialog(QtWidgets.QDialog):
         self.run_btn.setDefault(True)
         self.run_btn.setStyleSheet("QPushButton { background:#2a82da; color:white; font-weight:bold; }")
         self.run_btn.clicked.connect(self._toggle_run)
-        for w in (self.save_btn, self.copy_btn, self.preset_btn, self.open_btn):
+        for w in (self.save_btn, self.copy_btn, self.script_btn, self.preset_btn, self.open_btn):
             btns.addWidget(w)
         btns.addStretch(1)
         btns.addWidget(self.run_btn)
         v.addLayout(btns)
 
-        # Seed the look from the viewer's 3D pane colormap.
+        # Seed the look from the viewer's 3D pane (VTK look or VisPy colormap).
         try:
-            cm = self.viewer.view_3d.cmap_combo.currentText()
-            if cm in VISPY_TO_LOOK:
-                self._initial_look = VISPY_TO_LOOK[cm]
+            v3 = self.viewer.view_3d
+            if hasattr(v3, "look_combo"):
+                self._initial_look = v3.look_combo.currentText()
+            elif v3.cmap_combo.currentText() in VISPY_TO_LOOK:
+                self._initial_look = VISPY_TO_LOOK[v3.cmap_combo.currentText()]
         except Exception:
             pass
 
@@ -338,7 +350,7 @@ class RenderDialog(QtWidgets.QDialog):
         self.filmic_check.setChecked(c["tone_mapping"] == "filmic")
         self.exposure_spin.setValue(c["exposure"] or 0.0)
         self.ss_spin.setValue(int(c["supersample"]))
-        self.pre_combo.setCurrentIndex(0 if c["preprocess"] == "none" else 1)
+        self.pre_combo.setCurrentIndex(max(0, self.pre_combo.findData(c["preprocess"])))
         self.lo_spin.setValue(float(c["lo_pct"])); self.hi_spin.setValue(float(c["hi_pct"]))
         self.smooth_spin.setValue(float(c.get("smooth") or 0))
         self.largest_check.setChecked(bool(c["keep_largest"]))
@@ -424,6 +436,36 @@ class RenderDialog(QtWidgets.QDialog):
         return [self.py_edit.text().strip() or sys.executable, "-u", "-m", "zview.render", "run",
                 str(cfg_path), *what]
 
+    # ------------------------------------------------------------ view state
+
+    _WIDGET_KEYS = ("look", "lighting", "curve", "background")
+
+    def apply_view_state(self, state):
+        """Take look/lighting/window/camera from the interactive 3D pane."""
+        st = dict(state)
+        if st.get("look"):
+            self.look_combo.setCurrentText(str(st.pop("look")))
+        if st.get("lighting"):
+            self.light_combo.setCurrentText(str(st.pop("lighting")))
+        if "curve" in st:
+            self.curve_combo.setCurrentText(st.pop("curve") or "(from look)")
+        if st.get("background"):
+            self.bg_combo.setCurrentText(st.pop("background"))
+        if "smooth" in st:
+            self.smooth_spin.setValue(float(st.pop("smooth")))
+        if st.get("preprocess"):
+            self.pre_combo.setCurrentIndex(max(0, self.pre_combo.findData(st.pop("preprocess"))))
+        if "elev" in st:
+            self.elev_spin.setValue(float(st["elev"]))
+        try:
+            adv = json.loads(self.adv_edit.toPlainText() or "{}")
+        except json.JSONDecodeError:
+            adv = {}
+        adv.update(st)             # window_values, azimuth, elevations, zoom, opacity, scatter
+        self.adv_edit.setPlainText(json.dumps(adv, indent=1))
+        self._append("took look, window and camera from the 3D view "
+                     "(window / camera are in Advanced overrides)\n")
+
     # ------------------------------------------------------------ actions
 
     def _add_region(self):
@@ -494,6 +536,26 @@ class RenderDialog(QtWidgets.QDialog):
                 self.preset_combo.addItem(f"{n} — {desc}", n)
         self.preset_combo.setCurrentIndex(max(0, self.preset_combo.findData(cur)))
         self.preset_combo.blockSignals(False)
+
+    def _save_script(self):
+        try:
+            cfg = self._config()
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Save script", str(e))
+            return
+        out = Path(self.out_edit.text().strip()).expanduser()
+        out.mkdir(parents=True, exist_ok=True)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save render script", str(out / "render_job.py"),
+                                                        "Python (*.py)")
+        if not path:
+            return
+        cfg["max_axis"] = self.maxaxis_spin.value()
+        what = [n for n, c in self.out_checks.items() if c.isChecked()] or ["stills"]
+        Path(path).write_text(render_script(cfg, str(out), what, self.py_edit.text().strip()))
+        os.chmod(path, 0o755)
+        self._append(f"wrote {path}\nrun it in the background, e.g.:\n"
+                     f"  nohup {self.py_edit.text().strip() or 'python'} {path} --max-axis 1536 "
+                     f"> {Path(path).with_suffix('.log')} 2>&1 &\n")
 
     def _open_out(self):
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(self.out_edit.text().strip()))
@@ -589,3 +651,92 @@ class RenderDialog(QtWidgets.QDialog):
                 return
             self.proc.kill()
         super().closeEvent(event)
+
+
+SCRIPT_TEMPLATE = '''#!/usr/bin/env python3
+"""zview render job — generated by the zview viewer on {date}.
+
+Renders {what} of
+    {source}
+into
+    {out}
+
+Run it on a machine that can read the data and has a GPU with an X display
+(a VNC/desktop session, or VirtualGL); VTK renders off-screen, nothing
+appears on screen. For long jobs:
+
+    nohup {python} {script} > {log} 2>&1 &
+
+Options (all optional):
+    --max-axis N   longest side of the volume read for rendering
+                   (job default {max_axis}; 1536-2048 gives more detail on big
+                   GPUs: N**3 bytes of GPU memory, ~6*N**3 bytes of RAM)
+    --what ...     outputs: stills turntable tour surface
+    --out DIR      output folder
+    --set K=V      override any setting, e.g. --set size=3840x2160 --set frames=720
+    --dry-run      print the settings and exit
+
+Needs the zview render extras (VTK, SciPy, scikit-image, imageio-ffmpeg).
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+ZVIEW = {zview!r}        # zview package location (used if zview is not installed)
+if ZVIEW not in sys.path:
+    sys.path.insert(0, ZVIEW)
+
+CONFIG = json.loads(r"""
+{config}
+""")
+
+OUT = {out!r}
+WHAT = {what_list!r}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="zview render job")
+    ap.add_argument("--max-axis", type=int, default=CONFIG.get("max_axis"))
+    ap.add_argument("--what", nargs="*", default=WHAT)
+    ap.add_argument("--out", default=OUT)
+    ap.add_argument("--set", dest="sets", action="append", default=[], metavar="KEY=VALUE")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+
+    from zview.render import config as rc
+    from zview.render.cli import run
+
+    out = Path(a.out).expanduser().resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = dict(CONFIG, max_axis=a.max_axis)
+    cfg_path = out / f"render_job_{{a.max_axis}}.json"
+    if cfg_path.exists():      # keep the cached volume from an earlier run
+        old = json.loads(cfg_path.read_text())
+        for k in ("volume", "factor", "voxel_size_um", "pixel_size_um", "hdf5_dataset"):
+            if old.get(k) is not None and old.get("source") == cfg.get("source"):
+                cfg[k] = old[k]
+    cfg_path.write_text(json.dumps(cfg, indent=2))
+    overrides = rc.parse_set(a.sets)
+    if a.dry_run:
+        print(json.dumps(rc.effective(cfg, overrides), indent=2, default=str))
+        return
+    print(f"config: {{cfg_path}}", flush=True)
+    run(cfg_path, a.what, overrides, out)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def render_script(cfg, out, what, python=""):
+    """Source of a standalone background render script for `cfg`."""
+    import datetime
+    script = str(Path(out) / "render_job.py")
+    return SCRIPT_TEMPLATE.format(
+        date=datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), what=", ".join(what),
+        source=cfg.get("source"), out=out, python=python or "python", script=script,
+        log=str(Path(out) / "render_job.log"), max_axis=cfg.get("max_axis"), zview=PKG_PARENT,
+        config=json.dumps(cfg, indent=4), what_list=list(what))

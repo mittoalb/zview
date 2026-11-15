@@ -34,9 +34,12 @@ Filled in by `prepare`.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `preprocess` | `none` | `none` (window the intensities) or `tomo` (sample in a container: medium removal, wall fit, Z equalisation) |
+| `preprocess` | `none` | `none` (window the intensities), `tomo` (sample in a container: medium removal, wall fit, Z equalisation) or `labels` (class IDs) |
 | `window` | auto | `percentile` (default for `none`) or `otsu` (lower edge Otsu/2; default for `tomo`) |
 | `lo_pct`, `hi_pct` | 1, 99.8 | Window percentiles |
+| `window_values` | null | `[lo, hi]` absolute window (overrides the percentiles; `none` preprocessing) |
+| `labels` | from metadata | Label maps: `{value: {name, color, opacity, visible, role}}` (see [](../labels.md)) |
+| `label_smooth` | 1.0 | Label maps: smoothing of the shading field (voxels) |
 | `smooth` | 0 | Gaussian pre-smoothing (voxels) before windowing; gives noisy data clean normals |
 | `z_range` | null | `[Z0, Z1]` full-res slices to keep |
 | `cylinder` | null | Container cut, in full-res px: `[CY, CX, R]` or, for a tilted tube, `[CY_TOP, CX_TOP, CY_BOTTOM, CX_BOTTOM, R]` |
@@ -76,6 +79,7 @@ See [](looks.md).
 | `elev` | 20 | Turntable elevation (degrees) |
 | `elevations` | null | Still elevations (default `elev`, 45, −20, 0) |
 | `azimuths` | 8 | Stills per elevation |
+| `azimuth` | 0 | Start azimuth of stills and turntable (degrees) |
 | `zoom` | 1.0 | Camera zoom for stills and turntables (>1 is closer) |
 
 ## Text, tour, surface

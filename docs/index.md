@@ -20,8 +20,9 @@ It has two halves:
 :link-type: doc
 
 Orthogonal slicing with automatic pyramid-level selection, asynchronous
-chunk-aligned loading, linked crosshairs, shared contrast, and a
-low-resolution 3D view sized to your machine's GPU and RAM.
+chunk-aligned loading, linked crosshairs, shared contrast, label maps, and an
+interactive VTK 3D view with the renderer's looks and lighting, sized to your
+machine's GPU and RAM.
 :::
 
 :::{grid-item-card} Offline renderer — `zview-render`
@@ -50,6 +51,9 @@ command line or from the viewer.
   budget come from the CPU count, free RAM and the GPU.
 - **Many data layouts.** OME-NGFF 0.4 and 0.5 metadata, 2D to 5D arrays
   (`t`/`c` axes), anisotropic voxels, and numbered levels without metadata.
+- **Label maps.** Segmentations are detected and shown as classes: class
+  colours in 2D, per-class shaded 3D with a class panel, and label-aware
+  downsampling that keeps vessels and cells. [More](labels.md).
 - **Render quality.** Looks pair colour, opacity and material, and lighting
   rigs go with them. Supersampling and an ACES filmic curve finish the image.
   [See the gallery](rendering/looks.md).
@@ -74,6 +78,7 @@ test-data
 :caption: Viewer
 
 viewer
+labels
 performance
 ```
 

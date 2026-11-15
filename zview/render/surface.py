@@ -1,7 +1,6 @@
-# Moved from zarr-auto-render/render_surface.py.
 """Surface rendering with ambient occlusion + shadows ("Dragonfly-style" look), from a dataset.json.
 
-    python render_surface.py DIR/dataset.json [--frames 360] [--size 1920x1080]
+    zview-render run DIR/render.json surface [--frames 360] [--size 1920x1080]
 
   * brain surface = smoothed isosurface of the tissue mask (container cut, medium
     removed, debris dropped - same preprocessing as the volume renders)
@@ -15,15 +14,14 @@ Needs a display (DISPLAY set) and VTK.
 
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
 
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-from zview.render import vtk_render as rv                                    # noqa: E402
-from zview.render.vtk_render import log                                 # noqa: E402
+from zview.render import scene as rv                                    # noqa: E402
+from zview.render.scene import log                                 # noqa: E402
 from zview.render import looks as lk                                     # noqa: E402
 
 
@@ -114,14 +112,14 @@ def build_scene(vtk, poly, W, H, args, look=None, light=None, supersample=1):
     ren.SetPass(delegate)
     ren.SetUseFXAA(True)
 
-    rw = vtk.vtkRenderWindow(); rw.SetOffScreenRendering(1); rw.AddRenderer(ren)
+    rw = rv.offscreen_render_window(); rw.AddRenderer(ren)
     rw.SetSize(W * supersample, H * supersample)
     rw.SetMultiSamples(0)
     return ren, rw, actor
 
 
 class SurfaceScene:
-    """Same interface as render_vtk.Scene (look / pose / clip / section / grab / ...), but the
+    """Same interface as scene.Scene (look / pose / clip / section / grab / ...), but the
     brain is a lit surface with ambient occlusion; cuts are filled with the tissue section."""
 
     def __init__(self, U8, args, W, H, ao=0.03, roughness=0.65, pbr=True):
@@ -218,9 +216,13 @@ def main(argv=None):
                             mask_level=c("mask_level", 20), workers=args.workers,
                             preprocess=c("preprocess", "tomo"), window=cfg.get("window"),
                             voxel_size=cfg.get("voxel_size_um"), smooth=c("smooth", 0.0))
+    if pa.preprocess == "labels":
+        log("surface style is not available for label maps yet — use stills / turntable "
+            "(label maps are rendered with per-class shading there)")
+        return
     vol = rv.prepare_volume(pa)
     U8, spacing = vol["U8"], vol.get("spacing", (1, 1, 1))
-    sty = argparse.Namespace(look=args.look or cfg.get("look") or cfg.get("cmap") or "organic",
+    sty = argparse.Namespace(look=args.look or cfg.get("look") or "organic",
                              lighting=args.lighting or c("lighting", "studio"),
                              tone_mapping=args.tone_mapping or c("tone_mapping", "filmic"),
                              supersample=args.supersample or c("supersample", 2),

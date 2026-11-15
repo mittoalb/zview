@@ -1,6 +1,6 @@
 """Open any supported input as a (z, y, x) array for the render tools.
 
-    Zarr v2 / v3 / N5 store  -> pyramid via zview.msres (2D–5D arrays, OME-NGFF)
+    Zarr v2 / v3 / N5 store  -> pyramid via zview.core.pyramid (2D–5D arrays, OME-NGFF)
     HDF5 file                -> the 3-D dataset (auto-detected or named)
     folder of TIFF slices    -> lazy slice stack
 """
@@ -33,8 +33,8 @@ def kind(path):
 
 def open_pyramid(path):
     """MultiResolutionImage for a Zarr/N5 store."""
-    from zview.io import open_dataset
-    from zview.msres import MultiResolutionImage
+    from zview.core.io import open_dataset
+    from zview.core.pyramid import MultiResolutionImage
     store, _ = open_dataset(path)
     return MultiResolutionImage(store, cache_size_mb=64)
 
@@ -48,6 +48,6 @@ def open_fullres(path, dset=None):
         f = h5py.File(str(path), "r")
         return f[find_dataset(f, dset)]
     if k == "tiff":
-        from zview.convert import TiffStack
+        from zview.tools.convert import TiffStack
         return TiffStack(Path(path))
     return open_pyramid(path).levels[0]

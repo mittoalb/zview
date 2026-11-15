@@ -1,7 +1,9 @@
-"""Unified multi-resolution Zarr viewer: single/dual/quad/3D layouts + metadata tab."""
+"""The zview main window: 1/2/4-pane and 3D layouts, shared controls, menus.
+
+Run with `zview [PATH]` (see `main`)."""
 
 # Bind PyOpenGL to the same GL libraries as Qt before pyqtgraph imports it.
-from zview.sysinfo import apply_gl_compat as _apply_gl_compat
+from zview.core.sysinfo import apply_gl_compat as _apply_gl_compat
 _apply_gl_compat()
 
 import argparse
@@ -13,13 +15,14 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from zview import _log, sysinfo
-from zview.io import open_dataset as _open_dataset
-from zview.meta import MetadataViewer
-from zview.msres import MultiResolutionImage, io_workers
-from zview.oview import AXIS_LETTERS, OrthoImageView
-from zview.theme import AXIS_PLANE, PLANE_COLORS
-from zview.view3d import VISPY_AVAILABLE, Volume3DView, VolumeLoader
+from zview.core import log as _log, sysinfo
+from zview.core.io import open_dataset as _open_dataset
+from zview.viewer.metadata import MetadataViewer
+from zview.core.pyramid import MultiResolutionImage, io_workers
+from zview.viewer.panes import AXIS_LETTERS, SlicePane
+from zview.viewer.theme import AXIS_PLANE, PLANE_COLORS
+from zview.viewer.loader import VolumeLoader
+from zview.viewer.volume_vispy import VISPY_AVAILABLE, VispyVolumeView
 
 pg.setConfigOptions(imageAxisOrder='row-major')
 
@@ -148,7 +151,7 @@ class PaneFrame(QtWidgets.QWidget):
 
 # ============================================================ main window
 
-class UnifiedZarrViewer(QtWidgets.QMainWindow):
+class MainWindow(QtWidgets.QMainWindow):
     """Main window: toolbar + layouts (1/2/4/3D) + shared controls dock."""
 
     def __init__(self, parent=None):
@@ -167,6 +170,8 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         self._quad_maximized = None
         self._syncing_splitters = False
         self._auto_contrast_pending = False   # redo auto contrast once panes refine
+        self._label_table = None              # zview.core.labels.LabelTable when the data is a label map
+        self._label_lut = None
         self._setting_levels = False
 
         self.settings = QtCore.QSettings("zview", "zview")
@@ -181,8 +186,30 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- views
 
+    def _make_3d(self, compact):
+        """3D pane: VTK (high quality) when available and selected, else VisPy."""
+        if self._engine_3d() == "vtk":
+            from zview.viewer.volume_vtk import VTKVolumeView  # noqa: PLC0415 - heavy import
+            view = VTKVolumeView(self.loader, compact=compact)
+            view.renderJobRequested.connect(self._open_render_dialog)
+            return view
+        return VispyVolumeView(self.loader, compact=compact)
+
+    def _engine_3d(self):
+        if not hasattr(self, "_engine_cached"):
+            want = self.settings.value("view3d/engine", "vtk")
+            ok = False
+            if want == "vtk":
+                try:
+                    from zview.viewer.volume_vtk import VTK_AVAILABLE  # noqa: PLC0415
+                    ok = VTK_AVAILABLE
+                except Exception:
+                    ok = False
+            self._engine_cached = "vtk" if ok else "vispy"
+        return self._engine_cached
+
     def _make_ortho(self, plane):
-        view = OrthoImageView(plane)
+        view = SlicePane(plane)
         view.ui.roiBtn.hide()
         view.ui.menuBtn.hide()
         view.ui.histogram.hide()   # one shared histogram lives in the dock
@@ -226,7 +253,7 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         self.stack.addWidget(self._build_single_page())
         self.stack.addWidget(self._build_dual_page())
         self.stack.addWidget(self._build_quad_page())
-        self.view_3d_only = Volume3DView(self.loader, compact=False)
+        self.view_3d_only = self._make_3d(compact=False)
         self.stack.addWidget(self.view_3d_only)
         self.main_tabs.addTab(self.stack, "Viewer")
         self.metadata_viewer = MetadataViewer()
@@ -265,8 +292,6 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
             self.dual_views.append(view)
             splitter.addWidget(frame)
         splitter.setSizes([1, 1])
-        # Legacy attribute names.
-        self.dual_view1, self.dual_view2 = self.dual_views
         return splitter
 
     def _build_quad_page(self):
@@ -279,7 +304,7 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         self.xy_view = self._make_ortho('XY')
         self.xz_view = self._make_ortho('XZ')
         self.yz_view = self._make_ortho('YZ')
-        self.view_3d = Volume3DView(self.loader, compact=True)
+        self.view_3d = self._make_3d(compact=True)
 
         def frame(key, body, plane=None, title=""):
             f = PaneFrame(body, title=title, plane=plane, maximizable=True)
@@ -495,11 +520,6 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
             self._layout_actions[mode] = act
         self._layout_actions['single'].setChecked(True)
         self._layout_group.triggered.connect(lambda a: self.set_layout(a.data()))
-        # Legacy attribute names.
-        self._act_view_1 = self._layout_actions['single']
-        self._act_view_2 = self._layout_actions['dual']
-        self._act_view_4 = self._layout_actions['quad']
-        self._act_view_3d = self._layout_actions['3d']
 
         view_menu.addSeparator()
         act = view_menu.addAction("Reset view", self._reset_active_view)
@@ -508,6 +528,11 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         act.setShortcut("Shift+R")
         act = view_menu.addAction("Auto contrast", self.auto_contrast)
         act.setShortcut("A")
+        self._act_labels = view_menu.addAction("Treat as label map")
+        self._act_labels.setCheckable(True)
+        self._act_labels.setEnabled(False)
+        self._act_labels.setToolTip("Show integer data as class IDs (segmentation) or as intensities")
+        self._act_labels.toggled.connect(self._toggle_label_map)
         self._act_aspect = view_menu.addAction("Physical voxel aspect")
         self._act_aspect.setCheckable(True)
         self._act_aspect.setChecked(True)
@@ -530,6 +555,15 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         self._fullscreen_action.setShortcutContext(QtCore.Qt.ApplicationShortcut)
 
         view_menu.addSeparator()
+        engine_menu = view_menu.addMenu("3D engine")
+        eng_group = QtWidgets.QActionGroup(self)
+        current = self.settings.value("view3d/engine", "vtk")
+        for key, label in (("vtk", "VTK — high quality (looks, lighting, shadows)"),
+                           ("vispy", "VisPy — fast, minimal")):
+            a = QtWidgets.QAction(label, eng_group, checkable=True)
+            a.setChecked(current == key)
+            a.triggered.connect(lambda _c=False, k=key: self._set_engine(k))
+            engine_menu.addAction(a)
         cache_menu = view_menu.addMenu("Chunk cache size")
         cache_group = QtWidgets.QActionGroup(self)
         auto_mb = sysinfo.default_cache_mb()
@@ -705,10 +739,6 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
                 self.auto_contrast()
         self._update_pyramid_label()
 
-    # Legacy entry point (index-based).
-    def _on_layout_changed(self, index):
-        self.set_layout(LAYOUTS[index])
-
     def _toggle_pane_max(self, key):
         if self._quad_maximized == key:
             self._restore_panes()
@@ -777,10 +807,12 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
 
         self._attached.clear()
         self._levels = None
+        self._set_label_mode(mi.labels)
         self._attach_page_views()
-        self._link_histogram()
-        self.auto_contrast()
-        self._auto_contrast_pending = True
+        if self._label_table is None:
+            self._link_histogram()
+            self.auto_contrast()
+            self._auto_contrast_pending = True
 
         self.loader.set_dataset(mi)
         for v3 in (self.view_3d, self.view_3d_only):
@@ -820,7 +852,7 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
             return
         for view in self._page_views():
             if id(view) not in self._attached:
-                view.set_multires_image(mi, slice_indices=self.position)
+                view.set_dataset(mi, slice_indices=self.position)
                 self._attached.add(id(view))
             else:
                 view.set_slice_indices(*self.position)
@@ -852,6 +884,7 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         self.dataset_path = None
         self._levels = None
         self._auto_contrast_pending = False
+        self._set_label_mode(None)
         self.metadata_viewer.clear()
         for w in self.ds_labels.values():
             w.setText("—")
@@ -911,8 +944,6 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
                 self._update_pane_info(view)
         for v3 in (self.view_3d, self.view_3d_only):
             v3.set_position(*new)
-        # Legacy attributes.
-        self.z_pos, self.y_pos, self.x_pos = new
 
     def _step_view(self, view, delta):
         if self.multires_image is None:
@@ -942,13 +973,6 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         ax = view.fixed_axis
         pos[ax] = shape[ax] - 1 if value is None else value
         self.set_position(*pos)
-
-    # Legacy names used by older shortcuts.
-    def _step_z(self, delta):
-        self.set_position(self.position[0] + delta, self.position[1], self.position[2])
-
-    def _jump_z(self, value):
-        self.set_position(value, self.position[1], self.position[2])
 
     # ---------------------------------------------------------------- pane info / status
 
@@ -1003,15 +1027,12 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
             self.status_label.setText(f"[{view.axis_name}] outside volume")
             return
         val = "" if math.isnan(value) else (f"{value:.6g}")
+        if self._label_table is not None and val:
+            val = f"{int(value)} {self._label_table.name(int(value))}"
+            val = val if len(val) < 40 else val[:39] + "…"
         self.status_label.setText(
-            f"[{view.axis_name}] z={z:<6d} y={y:<6d} x={x:<6d} value={val:<10s} "
+            f"[{view.axis_name}] z={z:<6d} y={y:<6d} x={x:<6d} {'label' if self._label_table is not None else 'value'}={val:<10s} "
             f"L{view.current_level}   volume {_fmt_shape(shape)}")
-
-    # Legacy signature (plane, h, v) used by older code paths.
-    def _update_status(self, plane, h, v):
-        view = {'XY': self.xy_view, 'XZ': self.xz_view, 'YZ': self.yz_view}.get(plane)
-        if view is not None:
-            self._on_cursor(view, h, v, math.nan)
 
     def _on_volume_ready(self, res):
         self.view_3d_container.set_info(
@@ -1021,6 +1042,8 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
     # ---------------------------------------------------------------- contrast
 
     def _link_histogram(self):
+        if self._label_table is not None:
+            return
         """Point the shared histogram at the current page's primary pane.
 
         HistogramLUTItem.setImageItem() auto-levels to that image, which would
@@ -1066,12 +1089,63 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
                     v.imageItem.setLevels(saved)
 
     def _apply_display_to(self, view):
+        if self._label_table is not None:
+            # Categorical colours; fixed levels so each ID hits its own LUT entry.
+            view.imageItem.setLookupTable(self._label_lut)
+            view.imageItem.setLevels((0, len(self._label_lut) - 1))
+            return
         if self._levels is not None:
             view.imageItem.setLevels(self._levels)
         view.imageItem.setLookupTable(self.hist.item.getLookupTable)
 
+    def _toggle_label_map(self, on):
+        """User override of label detection; reloads the display and 3D."""
+        mi = self.multires_image
+        if mi is None or (mi.labels is not None) == on:
+            return
+        if on:
+            from zview.core.labels import detect_labels  # noqa: PLC0415
+            mi.labels = detect_labels(mi, force=True)
+        else:
+            mi.labels = None
+        self._set_label_mode(mi.labels)
+        self._levels = None
+        for view in self._page_views():
+            if id(view) in self._attached:
+                self._apply_display_to(view)
+        if mi.labels is None:
+            self._link_histogram()
+            self.auto_contrast()
+        self.loader.set_dataset(mi)
+        for v3 in (self.view_3d, self.view_3d_only):
+            v3.set_dataset(mi)
+            v3.set_position(*self.position)
+
+    def _set_label_mode(self, table):
+        """Switch display, contrast and status reporting for label maps."""
+        self._label_table = table
+        mi = self.multires_image
+        integer = mi is not None and np.issubdtype(np.dtype(mi.levels[0].dtype), np.integer)
+        self._act_labels.blockSignals(True)
+        self._act_labels.setChecked(table is not None)
+        self._act_labels.setEnabled(integer)
+        self._act_labels.blockSignals(False)
+        if table is None:
+            self._label_lut = None
+            self.hist.setEnabled(True)
+            self.hist.setToolTip("Drag the handles to set contrast; right-click the "
+                                 "colour bar for colormaps. Applies to every pane.")
+            return
+        size = 256 if max(table.values or [0]) < 256 else min(65536, max(table.values) + 1)
+        self._label_lut = table.lut_rgba(size)
+        self.hist.setEnabled(False)
+        self.hist.setToolTip("Label map: panes show class colours (contrast does not apply)")
+        names = ", ".join(c.name for c in list(table.classes.values())[:6])
+        self.stats_label.setText(f"label map · {len(table.classes)} classes ({table.source}): {names}"
+                                 + (" …" if len(table.classes) > 6 else ""))
+
     def _on_hist_levels_changed(self, *_):
-        if getattr(self, "_linking_hist", False):
+        if getattr(self, "_linking_hist", False) or self._label_table is not None:
             return
         if not self._setting_levels:
             self._auto_contrast_pending = False   # user took over
@@ -1084,12 +1158,17 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
                 view.imageItem.setLevels(self._levels)
 
     def _on_hist_lut_changed(self, *_):
+        if self._label_table is not None:
+            return
         for view in self._all_views():
             if id(view) in self._attached:
                 view.imageItem.setLookupTable(self.hist.item.getLookupTable)
 
     def auto_contrast(self):
         """Set shared contrast from the pixels currently visible in all panes."""
+        if self._label_table is not None:
+            self.statusBar().showMessage("Label map: contrast does not apply (class colours are fixed)", 3000)
+            return
         samples = []
         for view in self._page_views():
             data = view.get_current_image_data()
@@ -1135,6 +1214,8 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
 
     def _update_statistics(self):
         self._update_pyramid_label()
+        if self._label_table is not None:
+            return
         self._maybe_refine_contrast()
         view = self._primary_view()
         data = view.get_current_image_data() if view is not None else None
@@ -1193,6 +1274,11 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
         super().keyPressEvent(event)
 
     # ---------------------------------------------------------------- cache / system
+
+    def _set_engine(self, key):
+        self.settings.setValue("view3d/engine", key)
+        QtWidgets.QMessageBox.information(
+            self, "3D engine", "The 3D engine changes the next time zview starts.")
 
     def _set_cache_size(self, size_mb):
         self._cache_mb = size_mb
@@ -1281,14 +1367,16 @@ class UnifiedZarrViewer(QtWidgets.QMainWindow):
 
     # ---------------------------------------------------------------- dialogs
 
-    def _open_render_dialog(self):
+    def _open_render_dialog(self, view_state=None):
         if self.multires_image is None:
             QtWidgets.QMessageBox.information(self, "Render 3D", "Open a dataset first.")
             return
-        from zview.render_dialog import RenderDialog  # noqa: PLC0415
+        from zview.viewer.render_dialog import RenderDialog  # noqa: PLC0415
         dlg = getattr(self, "_render_dialog", None)
         if dlg is None or dlg.viewer.dataset_path != self.dataset_path:
             dlg = self._render_dialog = RenderDialog(self)
+        if isinstance(view_state, dict) and view_state:
+            dlg.apply_view_state(view_state)
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
@@ -1434,7 +1522,7 @@ def main(argv=None):
     app.setOrganizationName("zview")
     apply_dark_theme(app)
 
-    viewer = UnifiedZarrViewer()
+    viewer = MainWindow()
     if args.cache_mb:
         viewer._set_cache_size(args.cache_mb)
     if args.layout:

@@ -1,7 +1,6 @@
-# Moved from zarr-auto-render/vessels_segment.py.
 """Blood-vessel segmentation of a PRE-MASKED volume (brain already cut out, 0 = removed).
 
-    python vessels_segment.py INPUT --out vessels.zarr --pixel-size 15.04 [--tiff-out DIR]
+    zview-vessels segment INPUT --out vessels.zarr --pixel-size 15.04 [--tiff-out DIR]
 
 INPUT: a folder of 2-D TIFF slices, a Zarr (multiscale group -> --level, or a plain array)
 or an HDF5 file. Voxels equal to 0 are outside the brain. Vessels are dark tubes (empty
@@ -20,12 +19,11 @@ Per 256^3 tile (padded, all cores):
 
 Output: multiscale Zarr v3 (uint8 0/1; levels 1..3 max-pooled), same grid as the input, plus
 vessels_preview.png next to it; --tiff-out writes the full-resolution mask as 0/255 TIFFs.
-Render with:  python vessels_render.py vessels.zarr --image INPUT --out DIR
+Render with:  zview-vessels render vessels.zarr --image INPUT --out DIR
 """
 
 import argparse
 import os
-import sys
 import time
 from multiprocessing import Pool
 from pathlib import Path
@@ -49,10 +47,10 @@ def open_volume(path, level="0", dataset=None):
         z = zarr.open(str(path), mode="r")
         return z[level] if hasattr(z, "array_keys") else z
     if path.is_dir():
-        from zview.convert import TiffStack
+        from zview.tools.convert import TiffStack
         return TiffStack(path)
     import h5py
-    from zview.convert import find_dataset
+    from zview.tools.convert import find_dataset
     return find_dataset(h5py.File(path, "r"), dataset)[1]
 
 

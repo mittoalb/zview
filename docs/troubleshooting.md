@@ -2,8 +2,11 @@
 
 | Symptom | Fix |
 |---|---|
-| 3D pane or renders are **black** in a conda environment | PyOpenGL loaded a different `libOpenGL` from Qt's. zview binds PyOpenGL to the versioned libraries on startup; if you import zview modules from your own code, import `zview.zview2` (or call `zview.sysinfo.apply_gl_compat()`) before pyqtgraph or VisPy. `ZVIEW_NO_GL_COMPAT=1` disables the fix-up, which helps tell whether it's involved |
+| 3D pane or renders are **black** in a conda environment | PyOpenGL loaded a different `libOpenGL` from Qt's. zview binds PyOpenGL to the versioned libraries on startup; if you import zview modules from your own code, import `zview.viewer.app` (or call `zview.core.sysinfo.apply_gl_compat()`) before pyqtgraph or VisPy. `ZVIEW_NO_GL_COMPAT=1` disables the fix-up, which helps tell whether it's involved |
 | VTK: `bad X server connection`, segfault | GPU renders need an X display: run in a desktop or VNC session (`echo $DISPLAY` must print something). On headless servers use `zview-render cpu` |
+| A label map shows as grey intensities (or an image as classes) | Toggle **View › Treat as label map** |
+| Label maps render flat (no shading) | VTK older than 9.4: `pip install -U vtk` |
+| Segfault in VTK 9.4 when rendering off-screen | Its EGL window crashes; zview only uses EGL on VTK ≥ 9.7. Force GLX with `ZVIEW_VTK_OFFSCREEN=default` |
 | Render dialog: *No Python with VTK found* | `pip install 'zview[render]'` into some environment, or point **Renderer Python** at one |
 | A slow first 3D load or prepare | The dataset has no deep pyramid, so every chunk is decoded (the status line shows how much). Add pyramid levels (`zview-convert`) or lower the quality / `max_axis` |
 | Pyramid levels visibly jump when zooming | The per-level `translation` metadata uses a non-standard convention: set `ZVIEW_NO_TRANSLATION=1` |

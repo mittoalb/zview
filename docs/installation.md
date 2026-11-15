@@ -16,15 +16,15 @@ conda-forge).
 
 ## With the renderer and tomography tools
 
-The offline renderer, the converter and the vessel tools need VTK, SciPy,
+The offline renderer, the high-quality 3D pane, the converter and the vessel tools need VTK, SciPy,
 scikit-image, imageio with ffmpeg, matplotlib, Pillow, h5py and tifffile:
 
 ```console
 $ pip install -e '.[render]'
 ```
 
-That adds the `zview-render`, `zview-convert` and `zview-vessels` commands.
-For the optional napari viewer integration, use `'.[render,napari]'`.
+That adds the `zview-render`, `zview-convert` and `zview-vessels` commands, and
+the high-quality VTK 3D pane in the viewer.
 
 ### Using a separate render environment
 

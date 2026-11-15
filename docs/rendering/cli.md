@@ -43,9 +43,6 @@ config's `outputs`). `--preset` replaces the config's presets and can be
 repeated. Arguments after `--` go straight to the underlying renderer, for
 example `-- --keep-frames`.
 
-zarr-auto-render's `pipeline3d.py dataset.json tour --speed 0.5` form also
-works: `zview-render dataset.json tour --speed 0.5`.
-
 ## `zview-render presets`, `looks`
 
 ```text
@@ -66,11 +63,6 @@ $ zview-render cpu /data/sample/rec.zarr --out renders --budget-gb 24 --modes mi
 ```
 
 `zview-render cpu --help` lists all options.
-
-## `zview-render napari`
-
-Opens the data in napari for hand-tuning, or renders quick views headlessly
-(`--batch` uses the CPU renderer). Needs the `napari` extra.
 
 ## Launchers for unattended runs
 

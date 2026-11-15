@@ -17,11 +17,11 @@ def main(argv=None):
         return
     cmd, rest = argv[0], argv[1:]
     if cmd == "segment":
-        from zview.vessels import segment as m
+        from zview.tools.vessels import segment as m
     elif cmd == "fullres":
-        from zview.vessels import fullres as m
+        from zview.tools.vessels import fullres as m
     elif cmd == "render":
-        from zview.vessels import render as m
+        from zview.tools.vessels import render as m
     else:
         raise SystemExit(f"unknown command {cmd!r}\n\n{__doc__}")
     return m.main(rest)
