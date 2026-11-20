@@ -1,7 +1,8 @@
 # zview
 
-A viewer and renderer for large multi-resolution 3D volumes: Zarr (v2 and
-v3) and N5, plus HDF5 and TIFF stacks for rendering.
+A viewer and renderer for large 3D volumes: multi-resolution Zarr (v2 and v3)
+and N5, single-resolution HDF5 files (viewed through a strided virtual
+pyramid), plus TIFF stacks for rendering.
 
 - **`zview`**: an interactive viewer (PyQt5 + pyqtgraph) with chunk-aligned,
   parallel, asynchronous loading, automatic pyramid-level selection, linked
@@ -33,6 +34,10 @@ zview-render quick /path/to/data.zarr --out /tmp/render --preset interior stills
   metadata from Zarr v2, Zarr v3, or N5; also falls back to numbered
   subgroups (`0/`, `1/`, …) when no metadata is present. 2D–5D arrays are
   accepted (`t`/`c` axes are pinned to index 0).
+- **HDF5 files without a pyramid** — coarser levels take one voxel every
+  2, 4, 8, … straight from the file; uncompressed contiguous datasets are read
+  with parallel direct reads (fast on network storage). `zview scan.h5` or
+  `zview scan.h5:/exchange/data`.
 - **Chunk-aligned, parallel, asynchronous loading** — only the chunks that
   cover the visible region are fetched, in parallel, on background threads,
   so panning and slicing never block the UI. Each pane shows the coarsest
@@ -70,7 +75,8 @@ pip install -e .
 ```bash
 zview /path/to/dataset.zarr
 zview /path/to/dataset.n5 --layout quad
-zview                      # then File › Open (Ctrl+O) or drop a folder on the window
+zview /path/to/scan.h5     # HDF5; or scan.h5:/exchange/data to name the dataset
+zview                      # then File › Open (Ctrl+O), Open HDF5 file (Ctrl+Shift+O), or drop it on the window
 ```
 
 The last layout, window geometry and recent files are remembered.
@@ -147,8 +153,8 @@ procedural "tomography sample" phantoms (container, grains, pores, vessels,
 helix, bar-pattern resolution target, orientation cubes, noise) covering every
 feature: isotropic pyramid, anisotropic 5D OME-NGFF 0.5, pixel-centre
 translations, Zarr v2 float32 with NaNs, N5, numbered levels without
-metadata, a 2D image, and a large single-level volume (no pyramid) for the 3D
-stress path. About 30 s and 2 GB with defaults; `--quick` is 3 s.
+metadata, a 2D image, an HDF5 file (single resolution), and a large
+single-level volume (no pyramid) for the 3D stress path. About 30 s and 2 GB with defaults; `--quick` is 3 s.
 
 ```bash
 python scripts/make_fake_datasets.py /tmp/zview_fake          # --quick, --no-big, --big-shape Z Y X
@@ -163,6 +169,7 @@ zview/
     pyramid.py     MultiResolutionImage, Volume3D adapter, ChunkCache, parallel/pooled reads
     labels.py      label maps: detection, class tables, label-aware pooling
     io.py          open Zarr v2/v3 (zarr-python) and N5 (z5py)
+    hdf5.py        HDF5: dataset discovery, voxel size, parallel direct reads
     sysinfo.py     CPU/RAM/GPU probing, cache/thread defaults, 3D budget + planner
     log.py         small coloured logger
   viewer/          the Qt viewer (zview)
@@ -182,6 +189,22 @@ scripts/
   pipeline/               unattended convert + render launchers
 tests/             pytest suite (no display needed)
 docs/              Sphinx documentation (Read the Docs)
+```
+
+## Citing
+
+If you use zview in your work, please cite the software repository. GitHub's
+**Cite this repository** button (from [`CITATION.cff`](CITATION.cff)) gives
+APA and BibTeX, or use:
+
+```bibtex
+@software{zview,
+  author  = {Mittone, Alberto},
+  title   = {zview: viewer and renderer for large 3D image volumes},
+  url     = {https://github.com/mittoalb/zview},
+  version = {0.1.0},
+  year    = {2026}
+}
 ```
 
 ## Current known limitations

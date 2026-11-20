@@ -31,6 +31,21 @@ The planner then takes the **finest pyramid level that fits**. If none fits,
 it reads the coarsest level with a per-axis stride that grows on the longest
 axis first, which keeps voxels close to cubic.
 
+To override the automatic choice, click a level in the *Pyramid* panel. That
+level is rendered whole if the machine can hold it: the GPU texture limit,
+half the free VRAM and a quarter of the free RAM are checked, and levels
+over the limit are greyed out.
+
+For **HDF5 files** the automatic level also has a read limit. A strided level
+of a contiguous file reads whole rows, *file size / (z stride × y stride)*,
+so the level that fits the GPU could take minutes to read from network
+storage. The automatic level reads at most 2 GB (`ZVIEW_3D_MAX_READ_GB`). A
+click in the *Pyramid* panel still renders a finer level.
+
+Rendering speed is a separate matter. Rotating is fast with **Shadows** off
+(the default): tens of milliseconds per frame. With volumetric shadows on, a
+full-quality frame of dense data can take a second or more.
+
 Reads go block by block, in parallel, with a bounded amount of decoded data
 in flight (at most 1 GB or 10 % of free RAM). Peak memory is therefore the
 output plus a few blocks, whatever the size of the dataset. On a 537 GB test

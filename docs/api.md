@@ -7,7 +7,7 @@ renderer classes can be imported too, but their interfaces may change.
 
 ```{eval-rst}
 .. automodule:: zview.core.pyramid
-   :members: MultiResolutionImage, Volume3D, ChunkCache
+   :members: MultiResolutionImage, Volume3D, ChunkCache, StridedLevel, strided_factors
 ```
 
 ```{eval-rst}
@@ -18,6 +18,28 @@ renderer classes can be imported too, but their interfaces may change.
 .. automodule:: zview.render.sources
    :members:
 ```
+
+### HDF5 (single resolution)
+
+```{eval-rst}
+.. automodule:: zview.core.hdf5
+   :members: open_image, split_spec, is_hdf5, find_dataset, candidates, voxel_size, direct_reader, ContiguousDataset
+```
+
+Example: open an HDF5 file as a pyramid and read a strided level.
+
+```python
+from zview.core import hdf5
+
+mi, f, dset = hdf5.open_image("/data/scan.h5")      # or "scan.h5:/exchange/data"
+print(dset, [lvl.shape for lvl in mi.levels])        # level k = one voxel every 2**k
+vol = mi.read_volume(mi.get_num_levels() - 1)        # numpy (z, y, x)
+mi.close()
+f.close()
+```
+
+Any array with numpy slicing works the same way through
+`MultiResolutionImage.from_array(array, voxel_size=(z, y, x))`.
 
 Example: read a render-sized volume of any store.
 

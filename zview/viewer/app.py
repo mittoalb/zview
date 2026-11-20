@@ -454,9 +454,12 @@ class MainWindow(QtWidgets.QMainWindow):
         t.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         t.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         t.setStyleSheet("QTableWidget { font-family: monospace; font-size: 11px; }")
+        t.setWordWrap(False)              # never wrap a shape onto two lines
+        t.setTextElideMode(QtCore.Qt.ElideRight)
         hh = t.horizontalHeader()
-        for col, mode in enumerate((QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.Stretch,
-                                    QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.ResizeToContents)):
+        # Shapes keep their width; "Used by" takes what's left (elided if needed).
+        for col, mode in enumerate((QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.ResizeToContents,
+                                    QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.Stretch)):
             hh.setSectionResizeMode(col, mode)
         t.verticalHeader().setDefaultSectionSize(18)
         t.setToolTip("Click a level to render it in 3D. Greyed-out levels are too large for this machine.")

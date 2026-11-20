@@ -77,6 +77,15 @@ Label maps, the 3D pane, the level picker and **Render 3D…** all work as with
 Zarr. A render job gets the file as `source` and the dataset as
 `hdf5_dataset`.
 
+```{image} _static/img/ui/quad_h5.jpg
+:class: shot
+:alt: A contiguous HDF5 file open in 4 views: the Dataset panel reads "2 (1 stored + strided)" and level L1 is chosen for 3D in the Pyramid panel
+```
+
+*`phantom_scan.h5` from the [test data](test-data.md): one stored level plus a
+strided one. L1 was clicked in the Pyramid panel (●), so the 3D pane renders
+it.*
+
 ## Layouts
 
 ::::{grid} 1 1 2 2
