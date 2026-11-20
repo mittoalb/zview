@@ -286,7 +286,12 @@ def volume_budget(caps=None, itemsize=2, quality="auto"):
     reasons = []
 
     axis = QUALITY_PRESETS.get(quality)
-    if axis is None:  # auto
+    if quality == "machine":
+        # The hardware limit, not a quality tier: largest 3D texture the GPU
+        # takes (unknown -> 4096), then the RAM / VRAM limits below.
+        axis = caps.max_3d_texture or 4096
+        reasons.append(f"machine limit (3D texture ≤ {axis}{'' if caps.max_3d_texture else ', assumed'})")
+    elif axis is None:  # auto
         vram = caps.vram_total_mb
         if caps.software:
             axis, why = 256, "software renderer"
@@ -309,7 +314,7 @@ def volume_budget(caps=None, itemsize=2, quality="auto"):
         axis = env_axis
         reasons.append(f"ZVIEW_3D_MAX_AXIS={env_axis}")
 
-    if caps.max_3d_texture and caps.max_3d_texture < axis:
+    if caps.max_3d_texture and caps.max_3d_texture < axis and quality != "machine":
         axis = caps.max_3d_texture
         reasons.append(f"GL max 3D texture {caps.max_3d_texture}")
 

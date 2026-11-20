@@ -594,7 +594,7 @@ class VispyVolumeView(QtWidgets.QWidget):
 
     def _on_quality_changed(self, _idx):
         if self.loader.multires is not None and self.canvas is not None:
-            self.loader.request(self.quality_combo.currentData(), progressive=False)
+            self.loader.request(self.quality_combo.currentData(), progressive=False, auto=True)
         self._update_tooltip()
 
     def _on_load_started(self, desc):

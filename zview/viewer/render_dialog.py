@@ -109,7 +109,8 @@ class RenderDialog(QtWidgets.QDialog):
         v = QtWidgets.QVBoxLayout(self)
         src = self.viewer.dataset_path or ""
         top = QtWidgets.QFormLayout()
-        self.src_label = QtWidgets.QLabel(src or "(no dataset open)")
+        h5 = getattr(self.viewer, "hdf5_dataset", None)
+        self.src_label = QtWidgets.QLabel((src + (f" : {h5}" if h5 else "")) or "(no dataset open)")
         self.src_label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
         top.addRow("Source:", self.src_label)
         out_row = QtWidgets.QHBoxLayout()
@@ -398,6 +399,8 @@ class RenderDialog(QtWidgets.QDialog):
         eff = self._preset_eff
         cfg = {"preset": self._presets() if len(self._presets()) > 1 else self._presets()[0],
                "source": self.viewer.dataset_path}
+        if getattr(self.viewer, "hdf5_dataset", None):
+            cfg["hdf5_dataset"] = self.viewer.hdf5_dataset
         for k, val in self._widget_values().items():
             if k in ("title", "subtitle", "credit", "regions", "z_range") or eff.get(k) != val:
                 cfg[k] = val
@@ -421,7 +424,7 @@ class RenderDialog(QtWidgets.QDialog):
         if path.exists():
             # Keep the cached volume when the data side hasn't changed.
             old = json.loads(path.read_text())
-            same = all(old.get(k) == cfg.get(k) for k in ("source", "max_axis", "preprocess")) and \
+            same = all(old.get(k) == cfg.get(k) for k in ("source", "hdf5_dataset", "max_axis", "preprocess")) and \
                 old.get("source") == cfg["source"]
             for k in ("volume", "factor", "voxel_size_um", "pixel_size_um", "hdf5_dataset"):
                 if same and old.get(k) is not None:
@@ -714,8 +717,9 @@ def main():
     cfg_path = out / f"render_job_{{a.max_axis}}.json"
     if cfg_path.exists():      # keep the cached volume from an earlier run
         old = json.loads(cfg_path.read_text())
-        for k in ("volume", "factor", "voxel_size_um", "pixel_size_um", "hdf5_dataset"):
-            if old.get(k) is not None and old.get("source") == cfg.get("source"):
+        same = all(old.get(k) == cfg.get(k) for k in ("source", "hdf5_dataset"))
+        for k in ("volume", "factor", "voxel_size_um", "pixel_size_um"):
+            if same and old.get(k) is not None:
                 cfg[k] = old[k]
     cfg_path.write_text(json.dumps(cfg, indent=2))
     overrides = rc.parse_set(a.sets)

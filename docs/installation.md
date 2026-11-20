@@ -10,8 +10,8 @@ $ conda activate zview
 $ pip install -e .
 ```
 
-This installs the `zview` command, with PyQt5, pyqtgraph, VisPy and
-zarr-python 3. N5 support comes from `z5py` (in `environment.yml`, from
+This installs the `zview` command, with PyQt5, pyqtgraph, VisPy,
+zarr-python 3 and h5py (for HDF5 files). N5 support comes from `z5py` (in `environment.yml`, from
 conda-forge).
 
 ## With the renderer and tomography tools

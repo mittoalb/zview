@@ -6,8 +6,8 @@
 ```
 
 **zview** is a viewer and renderer for large 3D image volumes: multi-resolution
-**Zarr (v2 and v3)** and **N5** stores, plus HDF5 files and TIFF stacks for
-rendering. It is built for tomography and microscopy data that runs from gigabytes
+**Zarr (v2 and v3)** and **N5** stores, single-resolution HDF5 files (viewed
+through a strided virtual pyramid), and TIFF stacks for rendering. It is built for tomography and microscopy data that runs from gigabytes
 to many terabytes.
 
 It has two halves:

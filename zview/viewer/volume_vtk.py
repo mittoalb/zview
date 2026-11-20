@@ -59,6 +59,12 @@ def caps_from_vtk(rw):
                 caps.version = val.strip()
     except Exception:
         pass
+    # VTK doesn't expose GL_MAX_3D_TEXTURE_SIZE; use the typical values
+    # (NVIDIA / AMD: 16384; Intel and software renderers: 2048).
+    vendor = (caps.vendor + " " + caps.renderer).lower()
+    if caps.renderer:
+        caps.max_3d_texture = 16384 if any(k in vendor for k in ("nvidia", "amd", "ati ", "radeon")) \
+            and not caps.software else 2048
     if "nvidia" in caps.vendor.lower():
         try:
             out = subprocess.run(["nvidia-smi", "--query-gpu=memory.total,memory.free",
@@ -200,7 +206,7 @@ class VTKVolumeView(QtWidgets.QWidget):
         for label, key in _QUALITY_ITEMS:
             self.quality_combo.addItem(label, key)
         self.quality_combo.setToolTip("Volume size budget; Auto fits this machine's GPU/RAM")
-        self.quality_combo.activated.connect(lambda _: self._request_load(progressive=False))
+        self.quality_combo.activated.connect(lambda _: self._request_load(progressive=False, auto=True))
         hb.addWidget(self.quality_combo)
 
         self.preset_combo = QtWidgets.QComboBox()
@@ -224,6 +230,17 @@ class VTKVolumeView(QtWidgets.QWidget):
         hb.addWidget(self.light_combo)
         for w in (self.quality_combo, self.preset_combo, self.look_combo, self.light_combo):
             w.setSizeAdjustPolicy(QtWidgets.QComboBox.AdjustToContents)
+        self.shadows_btn = QtWidgets.QToolButton()
+        self.shadows_btn.setText("Shadows")
+        self.shadows_btn.setCheckable(True)
+        self.shadows_btn.setChecked(self._shadows_setting())
+        self.shadows_btn.setToolTip(
+            "Volumetric shadows in this pane (strength: ⚙ › Shadows).\n"
+            "Off: rotating and refining stay instant. On: much more realistic depth, but each\n"
+            "full-quality frame can take a second or more on dense data.\n"
+            "Offline jobs (▶ job) always render shadows.")
+        self.shadows_btn.toggled.connect(self._on_shadows_toggled)
+        hb.addWidget(self.shadows_btn)
         hb.addStretch(1)
 
         def tool(text, tip, slot, checkable=False):
@@ -353,6 +370,7 @@ class VTKVolumeView(QtWidgets.QWidget):
         self.curve_combo = QtWidgets.QComboBox()
         self.curve_combo.addItems(["(from look)", "solid", "soft", "layered", "glass", "mip"])
         self.curve_combo.currentIndexChanged.connect(self._apply_style)
+        self.scatter_slider.setEnabled(self.shadows_btn.isChecked())
         rows = [("Window", self.win_lo, self.win_hi), ("Opacity", self.opacity_slider, None),
                 ("Shadows", self.scatter_slider, None), ("Ray step", self.step_slider, None)]
         for r, (label, a, b) in enumerate(rows):
@@ -414,7 +432,17 @@ class VTKVolumeView(QtWidgets.QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        if not VTK_AVAILABLE or self.loader.multires is None:
+        if not VTK_AVAILABLE:
+            return
+        on = self._shadows_setting()      # the other layout's 3D pane may have changed it
+        if self.shadows_btn.isChecked() != on:
+            self.shadows_btn.blockSignals(True)
+            self.shadows_btn.setChecked(on)
+            self.shadows_btn.blockSignals(False)
+            self.scatter_slider.setEnabled(on)
+            if self.ren is not None and self.volume is not None:
+                self._apply_style()
+        if self.loader.multires is None:
             return
         if self._ensure_canvas():
             res = self.loader.result
@@ -521,10 +549,10 @@ class VTKVolumeView(QtWidgets.QWidget):
                 and not getattr(self.loader, "user_cancelled", False)):
             self._request_load()
 
-    def _request_load(self, progressive=True):
+    def _request_load(self, progressive=True, auto=False):
         if self.loader.multires is None or not self._ensure_canvas():
             return
-        self.loader.request(self.quality_combo.currentData(), progressive=progressive)
+        self.loader.request(self.quality_combo.currentData(), progressive=progressive, auto=auto)
 
     def _on_volume_ready(self, res):
         if self.isVisible() and self._ensure_canvas():
@@ -607,10 +635,23 @@ class VTKVolumeView(QtWidgets.QWidget):
 
     # ------------------------------------------------------------ style
 
-    def _style_args(self):
+    @staticmethod
+    def _shadows_setting():
+        return QtCore.QSettings("zview", "zview").value("vtk3d/shadows", False, type=bool)
+
+    def _on_shadows_toggled(self, on):
+        QtCore.QSettings("zview", "zview").setValue("vtk3d/shadows", bool(on))
+        self.scatter_slider.setEnabled(on)
+        self._apply_style()
+
+    def _style_args(self, offline=False):
+        """Render arguments from the widgets. offline=True ignores the Shadows
+        toggle (offline jobs always get shadows at the slider's strength)."""
         curve = None if self.curve_combo.currentIndex() == 0 else self.curve_combo.currentText()
         light = lk.get_lighting(self.light_combo.currentText())
         scatter = light["scatter"] * self.scatter_slider.value() / 100.0
+        if not offline and not self.shadows_btn.isChecked():
+            scatter = 0.0
         return argparse.Namespace(
             look=self.look_combo.currentText().strip() or "bone", lighting=self.light_combo.currentText(),
             curve=curve, opacity=self.opacity_slider.value() / 100.0, mask_level=20, interior=1.0,
@@ -962,7 +1003,7 @@ class VTKVolumeView(QtWidgets.QWidget):
         """Look / window / camera as zview-render config values."""
         if self._result is None:
             return {}
-        args = self._style_args()
+        args = self._style_args(offline=True)
         if self._result.labels is not None:
             az, el, zoom = self.camera_state()
             state = {"look": args.look, "lighting": args.lighting, "background": args.background,

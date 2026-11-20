@@ -229,8 +229,23 @@ def finish(rgb, exposure=1.0, tone_mapping="filmic", supersample=1):
     off instead of clipping, midtones gain contrast), or "none" (plain
     exposure multiply, the original behaviour).
     """
+    s = max(1, int(supersample))
+    if rgb.dtype == np.uint8:
+        # 8-bit input: the s×s mean is (integer sum) / s², so a table indexed by
+        # the sum gives the same bytes as the float path, several times faster
+        # (the interactive 3D pane calls this on every frame).
+        n = s * s
+        vals = (np.arange(255 * n + 1, dtype=np.float32) / np.float32(n)).reshape(1, -1, 1).repeat(3, axis=2)
+        lut = finish(vals, exposure, tone_mapping, 1)[0, :, 0]
+        if s == 1:
+            return lut[rgb]
+        h, w = rgb.shape[0] // s, rgb.shape[1] // s
+        sums = np.zeros((h, w, 3), np.uint32 if n > 257 else np.uint16)
+        for i in range(s):
+            for j in range(s):
+                sums += rgb[i:h * s:s, j:w * s:s]
+        return lut[sums]
     im = rgb.astype(np.float32)
-    s = int(supersample)
     if s > 1:
         h, w = im.shape[0] // s, im.shape[1] // s
         im = im[:h * s, :w * s].reshape(h, s, w, s, 3).mean(axis=(1, 3))

@@ -10,6 +10,8 @@ VisPy panes (and both the quad cell and the 3D page) share one loader, so
 the volume is read once.
 """
 
+import dataclasses
+import os
 import threading
 import time
 import traceback
@@ -37,6 +39,7 @@ class VolumeResult:
     seconds: float
     final: bool
     budget: object
+    chosen: bool = False          # level picked by the user (not automatic)
     labels: object = None         # zview.core.labels.LabelTable for label maps
     code_values: object = None    # data code -> label value (None: codes are the values)
 
@@ -47,7 +50,8 @@ class VolumeResult:
         tag = "" if self.final else " · preview"
         if self.labels is not None:
             tag = f" · {len(self.labels.classes)} classes" + (" (pooled)" if self.stride != (1, 1, 1) else "") + tag
-        return f"L{self.level} · {z}×{y}×{x}{st} · {mb:.0f} MB · {self.seconds:.1f}s{tag}"
+        lv = f"L{self.level} (chosen)" if self.chosen else f"L{self.level}"
+        return f"{lv} · {z}×{y}×{x}{st} · {mb:.0f} MB · {self.seconds:.1f}s{tag}"
 
 
 def _fmt_bytes(n):
@@ -117,6 +121,7 @@ class VolumeLoader(QtCore.QObject):
         self._gen = 0
         self._busy = False
         self.user_cancelled = False   # suppresses auto-reload until next request
+        self.level_override = None    # pyramid level chosen by the user (None = automatic)
         self._event.connect(self._dispatch)
         # Separate from the 2D pool so a big 3D read never starves slicing.
         self._executor = ThreadPoolExecutor(
@@ -140,6 +145,7 @@ class VolumeLoader(QtCore.QObject):
         self.multires = multires
         self.result = None
         self.user_cancelled = False
+        self.level_override = None
 
     def set_gl_caps(self, caps):
         if caps is not None and self.gl_caps is None:
@@ -152,6 +158,56 @@ class VolumeLoader(QtCore.QObject):
         if self.multires is not None:
             itemsize = np.dtype(self.multires.levels[0].dtype).itemsize
         return sysinfo.volume_budget(self.gl_caps, itemsize, quality or self.quality)
+
+    def level_cost(self, level):
+        """What rendering pyramid `level` whole would take, and whether it fits.
+
+        Returns dict(fits, reason, gpu_bytes, ram_bytes, read_bytes, budget):
+        checked against the machine limit (sysinfo "machine" budget: GPU
+        texture size, half the free VRAM, a quarter of free RAM).
+        """
+        shape = self.multires.levels[level].shape
+        itemsize = np.dtype(self.multires.levels[0].dtype).itemsize
+        vox = int(np.prod(shape, dtype=np.int64))
+        b = self.budget("machine")
+        reason = ""
+        if max(shape) > b.max_axis:
+            reason = f"longest side {max(shape)} > {b.max_axis} (GPU texture limit)"
+        elif vox > b.max_voxels:
+            reason = f"{vox / 1e9:.2f} G voxels > {b.max_voxels / 1e9:.2f} G ({'; '.join(b.reasons[1:]) or 'RAM / VRAM'})"
+        return dict(fits=not reason, reason=reason, gpu_bytes=vox, ram_bytes=vox * (itemsize + 1),
+                    read_bytes=self.multires.estimate_read_bytes(level, (1, 1, 1)), budget=b)
+
+    def _cap_read(self, plan, budget):
+        """Virtual (strided) pyramids only: coarsen the automatic level until it
+        reads at most ZVIEW_3D_MAX_READ_GB (default 2) from the file.
+
+        A stored pyramid level reads about its own size, but a strided level
+        of a contiguous file reads whole rows (file size / (fz * fy)), so the
+        level that fits the GPU can mean minutes of I/O on network storage.
+        A click in the Pyramid panel still renders any level that fits.
+        """
+        mi = self.multires
+        if not getattr(mi, "virtual_levels", False):
+            return plan, budget
+        try:
+            cap = float(os.environ.get("ZVIEW_3D_MAX_READ_GB", "2")) * 2**30
+        except ValueError:
+            cap = 2 * 2**30
+        if cap <= 0:
+            return plan, budget
+        first = mi.estimate_read_bytes(plan.level, plan.stride)
+        L, stride = plan.level, plan.stride
+        while L < len(mi.levels) - 1 and mi.estimate_read_bytes(L, stride) > cap:
+            L, stride = L + 1, (1, 1, 1)
+        if L == plan.level:
+            return plan, budget
+        shape = tuple(mi.levels[L].shape)
+        why = (f"read cap {cap / 2**30:g} GB (L{plan.level} would read {_fmt_bytes(first)}; "
+               f"ZVIEW_3D_MAX_READ_GB, or click a level in Pyramid)")
+        _log.info(f"[3D] {why} -> L{L}")
+        return (sysinfo.VolumePlan(L, (1, 1, 1), shape, shape),
+                dataclasses.replace(budget, reasons=list(budget.reasons) + [why]))
 
     def plan(self, quality=None):
         if self.multires is None:
@@ -190,10 +246,22 @@ class VolumeLoader(QtCore.QObject):
         elif kind == "done":
             self._set_busy(False)
 
-    def request(self, quality=None, progressive=True):
-        """(Re)load at `quality`; a previous load in flight is cancelled."""
+    def request(self, quality=None, progressive=True, level=None, auto=False):
+        """(Re)load; a previous load in flight is cancelled.
+
+        level: render this pyramid level whole (kept for later reloads until
+        auto=True, e.g. a quality change). Raises ValueError if it does not
+        fit the machine (see level_cost).
+        """
         if self.multires is None:
             return
+        if level is not None:
+            cost = self.level_cost(level)
+            if not cost["fits"]:
+                raise ValueError(f"level {level} is too large for this machine: {cost['reason']}")
+            self.level_override = int(level)
+        elif auto:
+            self.level_override = None
         if quality:
             self.quality = quality
         self._abort()
@@ -201,8 +269,15 @@ class VolumeLoader(QtCore.QObject):
         self._cancel = threading.Event()
         gen = self._gen
 
-        final_budget = self.budget()
-        final = sysinfo.plan_volume([l.shape for l in self.multires.levels], final_budget)
+        if self.level_override is not None:
+            L = self.level_override
+            shape = tuple(self.multires.levels[L].shape)
+            final_budget = self.budget("machine")
+            final = sysinfo.VolumePlan(L, (1, 1, 1), shape, shape)
+        else:
+            final_budget = self.budget()
+            final = sysinfo.plan_volume([l.shape for l in self.multires.levels], final_budget)
+            final, final_budget = self._cap_read(final, final_budget)
         stages = [(final, final_budget, True)]
         if progressive:
             prev_budget = self.budget("preview")
@@ -268,6 +343,7 @@ class VolumeLoader(QtCore.QObject):
                     value_range=vrange, dtype=str(multires.levels[0].dtype),
                     seconds=time.perf_counter() - t0, final=final, budget=budget,
                     labels=table, code_values=code_values,
+                    chosen=final and self.level_override is not None,
                 )
                 if gen != self._gen:
                     return
