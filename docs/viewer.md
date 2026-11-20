@@ -4,9 +4,11 @@
 $ zview [PATH] [--layout single|dual|quad|3d] [--cache-mb N]
 ```
 
-`PATH` is a Zarr (v2 or v3) or N5 store. You can also open one with
-**File › Open** (Ctrl+O), from **File › Open Recent**, or by dropping a folder
-onto the window. zview remembers the window geometry, the panel layout and the
+`PATH` is a Zarr (v2 or v3) or N5 store, or an HDF5 file (`scan.h5`, or
+`scan.h5:/exchange/data` to name the dataset). You can also open a store
+with **File › Open** (Ctrl+O), an HDF5 file with **File › Open HDF5 file**
+(Ctrl+Shift+O), either from **File › Open Recent**, or by dropping it onto
+the window. zview remembers the window geometry, the panel layout and the
 last layout mode.
 
 ## Supported data
@@ -21,6 +23,59 @@ last layout mode.
   tolerated).
 - **Anisotropic voxels.** Panes and the 3D view use the physical voxel size
   from the metadata (toggle with **View › Physical voxel aspect**).
+- **HDF5 files** with a single resolution (see below).
+
+## HDF5 files
+
+An HDF5 file usually holds one full-resolution dataset and no pyramid. zview
+builds the pyramid on the fly: each coarser level takes **one voxel every 2,
+4, 8, …** along each axis, read straight from the file with a strided
+selection. Nothing is averaged and nothing is written, so a file of any size
+opens at once and only the sampled planes and rows are read. Levels stop
+when the longest side is 256 or less. The *Dataset* panel shows
+"1 stored + strided", and each virtual level's tooltip in the *Pyramid* panel
+gives its stride.
+
+Which dataset
+: `/exchange/data`, `/data`, `/volume` or `/entry/data/data` if present,
+  otherwise the largest 3D dataset. If the file holds several volumes of the
+  same rank (for example `data`, `data_white` and `data_dark`), zview asks,
+  with the default preselected. Name it on the command line to skip the
+  question: `zview scan.h5:/exchange/data_white`. **Open Recent** remembers
+  the dataset.
+
+Voxel size
+: Read from the attributes `element_size_um`, `voxel_size_um`, `voxel_size`,
+  `pixel_size_um`, `pixel_size`, `resolution` or `spacing` (dataset first,
+  then file; one value or `[z, y, x]`, in µm), or from the DXchange
+  `/measurement/instrument/detection_system/objective/resolution`. Without
+  them, voxels are 1 × 1 × 1. Anisotropic data keeps its coarse axis: with
+  4 µm z and 1 µm y/x, only y and x are strided until they reach 4 µm.
+
+Speed and file layout
+: **Uncompressed contiguous** datasets (the usual reconstruction output) are
+  read directly, not through the HDF5 library: zview computes each sampled
+  row's position in the file and reads the rows in parallel. On network
+  storage this is about 10× faster than HDF5's own strided reads, which fetch
+  one row at a time. A strided level still has to read whole rows, so it reads
+  *file size / (z stride × y stride)*: for a 100 GB file, 0.4 GB at stride
+  16 and 6 GB at stride 4. The level's tooltip in the *Pyramid* panel shows the
+  figure. Set `ZVIEW_H5_DIRECT=0` to go through h5py instead.
+: The 3D pane's automatic level therefore also caps what it reads from an
+  HDF5 file: it picks the finest level that fits the GPU **and** reads at
+  most 2 GB (`ZVIEW_3D_MAX_READ_GB`; the status-line tooltip says when the
+  cap applied). A click on a level in the *Pyramid* panel renders it anyway.
+: Files with small chunks are also fast at every level. With
+  chunks that hold **whole slices**, often gzip-compressed (a common
+  tomography layout), any read from a slice decodes all of it, so the first
+  XZ or YZ view at a level decodes one slice per row. zview keeps those slices,
+  already strided, in memory, so later XZ/YZ views at any position are
+  instant. Expect a few seconds on open for such files. For repeated work on
+  very large files, convert them to OME-Zarr once ([](conversion.md)).
+
+Label maps, the 3D pane, the level picker and **Render 3D…** all work as with
+Zarr. A render job gets the file as `source` and the dataset as
+`hdf5_dataset`.
 
 ## Layouts
 
@@ -81,7 +136,14 @@ Display
   you've already changed it.
 
 Pyramid
-: Every level, with the ones in use highlighted and the panes that use them.
+: Every level, with the panes that use it. **Click a level to render it in
+  3D** at full resolution of that level, instead of the automatic choice. The
+  choice is marked with ● and kept across reloads; **Auto** (or changing the
+  quality menu of the 3D pane) goes back to the automatic level. Levels too
+  large for this machine are greyed out: the GPU texture limit, half the free
+  VRAM and a quarter of free RAM are checked. Each level's tooltip shows its
+  GPU memory, the RAM needed while loading, how much data it reads and, if it
+  doesn't fit, why.
 
 System
 : CPU count, free RAM, GPU, I/O threads, chunk cache and the automatic 3D
@@ -110,8 +172,9 @@ The 3D pane renders a copy of the volume sized for the machine (see
 software renderer. If even the coarsest pyramid level is too big, the level is
 read with a stride (with [label-aware pooling](labels.md) for label maps). A
 small preview appears first when that is much cheaper to read. The quality
-menu (Auto, Preview, Low, Medium, High, Max) overrides the budget, **✕**
-cancels a load, and the tooltip on the status line explains which limit
+menu (Auto, Preview, Low, Medium, High, Max) overrides the budget, a click
+on a level in the *Pyramid* panel renders exactly that level (if it fits),
+**✕** cancels a load, and the tooltip on the status line explains which limit
 applied.
 
 There are two engines (**View › 3D engine**, applied on restart):
@@ -123,6 +186,11 @@ VTK, high quality (the default when VTK is installed)
   window, opacity, shadow strength, ray step, smoothing, box, slice planes and
   background. Rendering is progressive: a draft frame while you drag, then
   full quality, then 2× supersampling once you pause.
+  **Shadows** (toolbar) switches volumetric shadows on and off. They are off by
+  default: shadows give far more realistic depth, but on dense data each
+  full-quality frame takes a second or more (without them, tens of
+  milliseconds). The choice is remembered, the strength is set in **⚙ ›
+  Shadows**, and offline jobs (**▶ job**) always render with shadows.
   Drag rotates, Shift+drag pans, Ctrl+drag rolls, the wheel zooms and a
   double-click resets. **📷** saves a still of the current view at any size,
   and **▶ job** opens [Render 3D…](rendering/dialog.md) with this pane's look,
@@ -149,6 +217,7 @@ The XZ and YZ panes and the 3D box use physical proportions.*
 | Key | Action |
 |---|---|
 | Ctrl+O / Ctrl+W | Open / close dataset |
+| Ctrl+Shift+O | Open an HDF5 file |
 | Ctrl+Shift+R | Render 3D… (offline renderer) |
 | Ctrl+1 … Ctrl+4 | 1 view / 2 views / 4 views / 3D |
 | PgUp / PgDn | Previous / next slice of the pane under the mouse (Shift: ×10) |

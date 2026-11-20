@@ -15,7 +15,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt5 import QtCore, QtGui, QtWidgets
 
-from zview.core import log as _log, sysinfo
+from zview.core import hdf5 as _hdf5, log as _log, sysinfo
 from zview.core.io import open_dataset as _open_dataset
 from zview.viewer.metadata import MetadataViewer
 from zview.core.pyramid import MultiResolutionImage, io_workers
@@ -160,6 +160,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zarr_group = None
         self.multires_image = None
         self.dataset_path = None
+        self.hdf5_dataset = None           # dataset path inside an open HDF5 file
 
         self.position = [0, 0, 0]          # (z, y, x) level-0
         self.layout_mode = 'single'
@@ -443,10 +444,35 @@ class MainWindow(QtWidgets.QMainWindow):
         # --- Pyramid
         pyr_group = QtWidgets.QGroupBox("Pyramid")
         pl = QtWidgets.QVBoxLayout(pyr_group)
-        self.pyramid_label = QtWidgets.QLabel("—")
-        self.pyramid_label.setStyleSheet("font-family: monospace; font-size: 11px;")
-        self.pyramid_label.setTextFormat(QtCore.Qt.RichText)
-        pl.addWidget(self.pyramid_label)
+        t = QtWidgets.QTableWidget(0, 4)
+        t.setHorizontalHeaderLabels(["Level", "Shape (z×y×x)", "×", "Used by"])
+        t.verticalHeader().hide()
+        t.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        t.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        t.setFocusPolicy(QtCore.Qt.NoFocus)
+        t.setShowGrid(False)
+        t.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        t.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        t.setStyleSheet("QTableWidget { font-family: monospace; font-size: 11px; }")
+        hh = t.horizontalHeader()
+        for col, mode in enumerate((QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.Stretch,
+                                    QtWidgets.QHeaderView.ResizeToContents, QtWidgets.QHeaderView.ResizeToContents)):
+            hh.setSectionResizeMode(col, mode)
+        t.verticalHeader().setDefaultSectionSize(18)
+        t.setToolTip("Click a level to render it in 3D. Greyed-out levels are too large for this machine.")
+        t.cellClicked.connect(self._on_pyramid_clicked)
+        self.pyramid_table = t
+        pl.addWidget(t)
+        row3d = QtWidgets.QHBoxLayout()
+        self.level3d_label = QtWidgets.QLabel("3D level: auto")
+        self.level3d_label.setStyleSheet("color:#9a9a9a; font-size: 11px;")
+        row3d.addWidget(self.level3d_label, 1)
+        self.level3d_auto = QtWidgets.QPushButton("Auto")
+        self.level3d_auto.setToolTip("Let zview pick the 3D level for this machine again")
+        self.level3d_auto.clicked.connect(self._on_level3d_auto)
+        self.level3d_auto.setEnabled(False)
+        row3d.addWidget(self.level3d_auto)
+        pl.addLayout(row3d)
         lay.addWidget(pyr_group)
 
         # --- System
@@ -458,6 +484,8 @@ class MainWindow(QtWidgets.QMainWindow):
         sl.addWidget(self.system_label)
         lay.addWidget(sys_group)
         self.loader.capsChanged.connect(self._update_system_label)
+        self.loader.capsChanged.connect(self._update_pyramid_label)
+        self.loader.busyChanged.connect(lambda _b: self._update_pyramid_label())
         self._update_system_label()
 
         lay.addStretch(1)
@@ -478,7 +506,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _build_statusbar(self):
         sb = self.statusBar()
-        self.status_label = QtWidgets.QLabel("Open a Zarr/N5 dataset (Ctrl+O) or drop a folder here")
+        self.status_label = QtWidgets.QLabel("Open a Zarr/N5 store (Ctrl+O), an HDF5 file (Ctrl+Shift+O), or drop one here")
         self.status_label.setStyleSheet("font-family: monospace; font-size: 11px; padding: 0 6px;")
         sb.addWidget(self.status_label, 1)
         self.cache_stats_label = QtWidgets.QLabel("")
@@ -495,6 +523,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.style().standardIcon(QtWidgets.QStyle.SP_DirOpenIcon), "&Open…", self._load_file)
         act_open.setShortcut("Ctrl+O")
         self._act_open = act_open
+        act_h5 = file_menu.addAction("Open &HDF5 file…", self._load_h5_file)
+        act_h5.setShortcut("Ctrl+Shift+O")
+        act_h5.setToolTip("Single-resolution HDF5: coarser levels take one voxel every 2, 4, 8, …")
         self._recent_menu = file_menu.addMenu("Open &Recent")
         self._rebuild_recent_menu()
         file_menu.addSeparator()
@@ -777,33 +808,80 @@ class MainWindow(QtWidgets.QMainWindow):
         if path:
             self.open_path(path)
 
+    def _load_h5_file(self):
+        start = self.settings.value("last_dir", str(Path.home()))
+        exts = " ".join("*" + s for s in _hdf5.SUFFIXES)
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open HDF5 file", start, f"HDF5 ({exts});;All files (*)")
+        if path:
+            self.open_path(path)
+
+    def _choose_h5_dataset(self, path):
+        """The dataset to view in an HDF5 file; asks if several volumes qualify.
+
+        Returns the dataset path, or None if the user cancelled.
+        """
+        f = _hdf5.open_file(path, cache_mb=1)
+        try:
+            default = _hdf5.find_dataset(f)
+            cands = _hdf5.candidates(f)
+        finally:
+            f.close()
+        top = [c for c in cands if len(c[1]) == len(cands[0][1])] if cands else []
+        if len(top) <= 1:
+            return default
+        items = [f"{p}   {_fmt_shape(sh)} {dt}" for p, sh, dt in cands]
+        idx = next((i for i, c in enumerate(cands) if c[0] == default), 0)
+        QtWidgets.QApplication.restoreOverrideCursor()
+        try:
+            item, ok = QtWidgets.QInputDialog.getItem(
+                self, "Open HDF5 file", f"{Path(path).name} has several datasets. Which one?",
+                items, idx, False)
+        finally:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+        return cands[items.index(item)][0] if ok else None
+
     def open_path(self, path):
-        """Open a dataset at `path` (directory store)."""
+        """Open a dataset: a Zarr/N5 store folder, or an HDF5 file ('file.h5[:/dataset]')."""
         path = str(path)
+        h5_dset = None
         QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
         try:
-            self._close_store(quiet=True)
-            store, backend = _open_dataset(path)
-            mi = MultiResolutionImage(store, cache_size_mb=self._cache_mb)
+            if _hdf5.is_hdf5(path):
+                path, h5_dset = _hdf5.split_spec(path)
+                if h5_dset is None:
+                    h5_dset = self._choose_h5_dataset(path)
+                    if h5_dset is None:
+                        QtWidgets.QApplication.restoreOverrideCursor()
+                        return
+                self._close_store(quiet=True)
+                mi, store, h5_dset = _hdf5.open_image(path, h5_dset, cache_size_mb=self._cache_mb)
+                backend = "hdf5"
+            else:
+                self._close_store(quiet=True)
+                store, backend = _open_dataset(path)
+                mi = MultiResolutionImage(store, cache_size_mb=self._cache_mb)
         except Exception as e:
             QtWidgets.QApplication.restoreOverrideCursor()
             import traceback  # noqa: PLC0415
             traceback.print_exc()
             QtWidgets.QMessageBox.critical(self, "Could not open dataset", f"{path}\n\n{e}")
             return
-        _log.success(f"[zview] opened {Path(path).name} via {backend}")
+        name = Path(path).name + (f":{h5_dset}" if h5_dset else "")
+        _log.success(f"[zview] opened {name} via {backend}")
 
         self.zarr_store = self.zarr_group = store
         self.multires_image = mi
         self.dataset_path = path
+        self.hdf5_dataset = h5_dset
         self.settings.setValue("last_dir", str(Path(path).parent))
-        self._add_recent(path)
+        self._add_recent(f"{path}:{h5_dset}" if h5_dset else path)
 
         shape = mi.get_level_shape(0)
         self.position = [s // 2 for s in shape]
         self._set_position_controls_range(shape)
         self._set_position_controls_enabled(True)
-        self._fill_dataset_info(Path(path).name)
+        self._fill_dataset_info(name)
 
         self._attached.clear()
         self._levels = None
@@ -821,13 +899,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view_3d_container.set_info("")
 
         self.metadata_viewer.load_metadata(store)
-        self.setWindowTitle(f"zview — {Path(path).name}")
+        self.setWindowTitle(f"zview — {name}")
         self._update_system_label()
         self._update_pyramid_label()
         QtWidgets.QApplication.restoreOverrideCursor()
         self.status_label.setText(
-            f"Opened {Path(path).name}: {_fmt_shape(shape)} {mi.levels[0].dtype}, "
-            f"{mi.get_num_levels()} levels ({backend})")
+            f"Opened {name}: {_fmt_shape(shape)} {mi.levels[0].dtype}, "
+            + (f"1 stored + {mi.get_num_levels() - 1} strided levels ({backend})" if mi.virtual_levels
+               else f"{mi.get_num_levels()} levels ({backend})"))
 
     def _fill_dataset_info(self, name):
         mi = self.multires_image
@@ -837,8 +916,16 @@ class MainWindow(QtWidgets.QMainWindow):
         raw = "" if lvl0.raw_shape == lvl0.shape else f"  (raw {_fmt_shape(lvl0.raw_shape)})"
         self.ds_labels["shape"].setText(_fmt_shape(lvl0.shape) + raw)
         self.ds_labels["dtype"].setText(str(lvl0.dtype))
-        self.ds_labels["chunks"].setText(_fmt_shape(lvl0.chunks) if lvl0.chunks else "—")
-        self.ds_labels["levels"].setText(str(mi.get_num_levels()))
+        self.ds_labels["chunks"].setText(_fmt_shape(lvl0.chunks) if lvl0.chunks
+                                         else ("contiguous" if mi.virtual_levels else "—"))
+        if mi.virtual_levels:
+            self.ds_labels["levels"].setText(f"{mi.get_num_levels()} (1 stored + strided)")
+            self.ds_labels["levels"].setToolTip(
+                "Single-resolution data: each coarser level reads one voxel every 2, 4, 8, … "
+                "straight from the file (no averaging, nothing written).")
+        else:
+            self.ds_labels["levels"].setText(str(mi.get_num_levels()))
+            self.ds_labels["levels"].setToolTip("")
         vs = mi.voxel_size()
         units = mi.axis_units or [None] * 3
         unit = units[-1] or ""
@@ -880,8 +967,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.zarr_store = self.zarr_group = None
         if self.multires_image is not None:
             self.multires_image.chunk_cache.clear()
+            self.multires_image.close()
         self.multires_image = None
         self.dataset_path = None
+        self.hdf5_dataset = None
         self._levels = None
         self._auto_contrast_pending = False
         self._set_label_mode(None)
@@ -890,7 +979,7 @@ class MainWindow(QtWidgets.QMainWindow):
             w.setText("—")
         self._set_position_controls_enabled(False)
         self.stats_label.setText("")
-        self.pyramid_label.setText("—")
+        self._update_pyramid_label()
         self.cache_stats_label.setText("")
         self.setWindowTitle("zview")
         if not quiet:
@@ -990,27 +1079,91 @@ class MainWindow(QtWidgets.QMainWindow):
         self._stats_timer.start(150)
 
     def _update_pyramid_label(self):
+        """Refresh the clickable pyramid table (levels, use, 3D eligibility)."""
+        t = self.pyramid_table
         mi = self.multires_image
+        t.setRowCount(0)
         if mi is None:
-            self.pyramid_label.setText("—")
+            self.level3d_label.setText("3D level: —")
+            self.level3d_auto.setEnabled(False)
             return
         in_use = {}
         for view in self._page_views():
             if id(view) in self._attached:
                 in_use.setdefault(view.current_level, []).append(view.axis_name)
         res = self.loader.result
-        if res is not None and self.layout_mode in ('quad', '3d'):
+        if res is not None:
             in_use.setdefault(res.level, []).append("3D")
-        rows = []
+        chosen = self.loader.level_override
+        grey, bright, accent = QtGui.QColor(110, 110, 110), QtGui.QColor(232, 232, 232), QtGui.QColor(42, 130, 218)
         for i in range(mi.get_num_levels()):
             shape = mi.get_level_shape(i)
             ds = mi.level_downsample(i)
-            tag = ", ".join(in_use.get(i, []))
-            style = "color:#e8e8e8; font-weight:bold;" if tag else "color:#888;"
-            rows.append(
-                f"<tr style='{style}'><td>L{i}&nbsp;</td><td>{_fmt_shape(shape)}&nbsp;</td>"
-                f"<td>{ds[2]:.3g}×&nbsp;</td><td style='color:#2a82da'>{tag}</td></tr>")
-        self.pyramid_label.setText("<table cellspacing=0>" + "".join(rows) + "</table>")
+            cost = self.loader.level_cost(i)
+            used = ", ".join(in_use.get(i, []))
+            cells = [f"L{i}" + (" ●" if chosen == i else ""), _fmt_shape(shape), f"{ds[2]:.3g}×",
+                     used if cost["fits"] else (used + " · " if used else "") + "too large"]
+            fac = mi.level_factors(i)
+            tip = (f"L{i}: {_fmt_shape(shape)}\n"
+                   + (f"Virtual level: one voxel every {'×'.join(map(str, fac))} (z×y×x) of the file\n"
+                      if fac and i else "")
+                   + f"GPU texture {cost['gpu_bytes'] / 2**30:.2f} GB · RAM while loading "
+                   f"{cost['ram_bytes'] / 2**30:.2f} GB · reads {cost['read_bytes'] / 2**30:.2f} GB\n"
+                   + ("Click to render this level in 3D." if cost["fits"] else f"Too large: {cost['reason']}")
+                   + f"\nMachine limit: {cost['budget'].summary()}")
+            r = t.rowCount()
+            t.insertRow(r)
+            for col, text in enumerate(cells):
+                it = QtWidgets.QTableWidgetItem(text)
+                it.setToolTip(tip)
+                if not cost["fits"]:
+                    it.setForeground(grey)
+                    it.setFlags(QtCore.Qt.NoItemFlags)
+                else:
+                    it.setForeground(accent if col == 3 or chosen == i else bright)
+                    it.setFlags(QtCore.Qt.ItemIsEnabled)
+                    if chosen == i or used:
+                        f = it.font()
+                        f.setBold(True)
+                        it.setFont(f)
+                t.setItem(r, col, it)
+        t.resizeRowsToContents()
+        rows_h = sum(t.rowHeight(r) for r in range(t.rowCount()))
+        t.setFixedHeight(t.horizontalHeader().sizeHint().height() + rows_h + 2 * t.frameWidth() + 2)
+        if chosen is not None:
+            self.level3d_label.setText(f"3D level: L{chosen} (chosen)")
+        elif res is not None:
+            self.level3d_label.setText(f"3D level: auto (L{res.level}"
+                                       + (f", stride {'×'.join(map(str, res.stride))}" if res.stride != (1, 1, 1) else "")
+                                       + ")")
+        else:
+            self.level3d_label.setText("3D level: auto")
+        self.level3d_auto.setEnabled(chosen is not None)
+
+    def _on_pyramid_clicked(self, row, _col):
+        mi = self.multires_image
+        if mi is None or not (0 <= row < mi.get_num_levels()):
+            return
+        cost = self.loader.level_cost(row)
+        if not cost["fits"]:
+            self.statusBar().showMessage(f"L{row} is too large for this machine: {cost['reason']}", 6000)
+            return
+        try:
+            self.loader.request(level=row, progressive=False)
+        except ValueError as e:
+            self.statusBar().showMessage(str(e), 6000)
+            return
+        self.statusBar().showMessage(
+            f"3D: loading L{row} ({_fmt_shape(mi.get_level_shape(row))}, reads "
+            f"{cost['read_bytes'] / 2**30:.2f} GB)"
+            + ("" if self.layout_mode in ("quad", "3d") else " — switch to 4 views or 3D to see it"), 6000)
+        self._update_pyramid_label()
+
+    def _on_level3d_auto(self):
+        if self.multires_image is None:
+            return
+        self.loader.request(auto=True)
+        self._update_pyramid_label()
 
     def _on_cursor(self, view, h, v, value):
         self._active_view = view
@@ -1337,7 +1490,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             urls = [u for u in event.mimeData().urls() if u.isLocalFile()]
-            if urls and Path(urls[0].toLocalFile()).is_dir():
+            if urls and (Path(urls[0].toLocalFile()).is_dir() or _hdf5.is_hdf5(urls[0].toLocalFile())):
                 event.acceptProposedAction()
 
     def dropEvent(self, event):
@@ -1386,6 +1539,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self, "Keyboard & mouse",
             "<table cellpadding=3>"
             "<tr><td><b>Ctrl+O</b></td><td>Open dataset (or drop a folder on the window)</td></tr>"
+            "<tr><td><b>Ctrl+Shift+O</b></td><td>Open HDF5 file</td></tr>"
             "<tr><td><b>Ctrl+1…4</b></td><td>1 view / 2 views / 4 views / 3D</td></tr>"
             "<tr><td><b>PgUp / PgDn</b></td><td>Previous / next slice of the pane under the mouse"
             " (Shift: ×10)</td></tr>"
@@ -1510,7 +1664,8 @@ def apply_dark_theme(app):
 def main(argv=None):
     """Run the unified viewer: `zview [PATH] [--layout quad]`."""
     parser = argparse.ArgumentParser(prog="zview", description="Multi-resolution Zarr/N5 viewer")
-    parser.add_argument("path", nargs="?", help="Zarr (v2/v3) or N5 store directory")
+    parser.add_argument("path", nargs="?",
+                        help="Zarr (v2/v3) or N5 store directory, or an HDF5 file (FILE.h5[:/dataset])")
     parser.add_argument("--layout", choices=LAYOUTS, help="initial layout")
     parser.add_argument("--cache-mb", type=int, help="chunk cache size (default: auto)")
     args, qt_args = parser.parse_known_args(sys.argv[1:] if argv is None else argv)

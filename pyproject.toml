@@ -12,6 +12,7 @@ dependencies = [
     "pyqt5",
     "pyqtgraph",
     "zarr>=3.0",
+    "h5py",
     "PyOpenGL",
     "PyOpenGL_accelerate",
     "vispy",

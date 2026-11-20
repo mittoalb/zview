@@ -51,6 +51,9 @@ cancels. Datasets with 5–6 pyramid levels load in seconds.
 | `ZVIEW_CACHE_MB` | 2D chunk-cache size. |
 | `ZVIEW_3D_MAX_AXIS` | Per-axis cap for the viewer's 3D texture. |
 | `ZVIEW_3D_MAX_VOXELS` | Total texel budget for the viewer's 3D texture (RAM and VRAM limits still apply). |
+| `ZVIEW_3D_MAX_READ_GB` | HDF5 only: most data the 3D pane's automatic level may read from the file (default 2; `0` = no cap). |
+| `ZVIEW_H5_DIRECT` | `0` reads uncompressed contiguous HDF5 datasets through h5py instead of zview's parallel direct reads. |
+| `ZVIEW_PREAD_THREADS` | Parallel reads for direct HDF5 access (default 32, 8–64). |
 | `ZVIEW_NO_TRANSLATION` | `1` ignores OME-NGFF per-level translations (for datasets that write them in a non-standard way). |
 | `ZVIEW_NO_GL_COMPAT` | `1` disables the PyOpenGL library fix-up (see [](troubleshooting.md)). |
 | `ZVIEW_VTK_OFFSCREEN` | `egl` or `default`: off-screen VTK window kind (default: EGL on VTK ≥ 9.7, else GLX). |
