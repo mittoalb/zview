@@ -35,6 +35,12 @@ Datasets written to OUT_DIR (default /tmp/zview_fake):
                               multiscales metadata (fallback discovery).
   numbered_no_metadata.zarr   Zarr v2 group with arrays 0..3, no attributes.
   image_2d.zarr               2D uint8 4096², 5 levels.
+  phantom_scan.h5             HDF5 (DXchange layout), the phantom_iso volume
+                              as ONE contiguous uint16 dataset /exchange/data
+                              (voxel_size attribute), plus small data_white /
+                              data_dark. Tests the single-resolution HDF5 path:
+                              strided virtual levels, direct reads, the
+                              dataset chooser.
   big_single_level.zarr       Zarr v3 uint8, default 768×2048×2048 (3.2 GB raw),
                               ONE level (no pyramid). Stress test for the
                               strided 3D path, progress and cancel.
@@ -481,6 +487,27 @@ def write_n5(path, phantom, shape, voxel, levels):
 
 # ============================================================== main
 
+def write_h5(path, src_zarr):
+    """Copy level 0 of `src_zarr` into a DXchange-style HDF5 file (contiguous)."""
+    try:
+        import h5py
+    except ImportError:
+        print(f"  skip {path.name}: h5py not installed")
+        return
+    t = time.perf_counter()
+    src = zarr.open_array(str(src_zarr / "0"), mode="r")
+    with h5py.File(path, "w") as f:
+        d = f.create_dataset("exchange/data", shape=src.shape, dtype=src.dtype)   # contiguous
+        for z in range(0, src.shape[0], 64):
+            d[z:z + 64] = src[z:z + 64]
+        d.attrs["voxel_size"] = [1.0, 1.0, 1.0]
+        flat = np.full((4,) + src.shape[1:], 30000, src.dtype)
+        f.create_dataset("exchange/data_white", data=flat)
+        f.create_dataset("exchange/data_dark", data=np.full((2,) + src.shape[1:], 100, src.dtype))
+    print(f"  {path.name}: {src.shape} {src.dtype}, contiguous, + data_white/data_dark "
+          f"({time.perf_counter() - t:.1f}s)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("out", nargs="?", default="/tmp/zview_fake")
@@ -558,7 +585,10 @@ def main():
                           voxel=(1.0, 1.0, 1.0), levels=5 if args.big_pyramid else 1,
                           group_blocks=(1, 1, 2))
 
-    # 8. N5 (z5py writes in-process; small).
+    # 8. HDF5: phantom_iso's full-resolution level as one contiguous dataset.
+    write_h5(out / "phantom_scan.h5", out / "phantom_iso.zarr")
+
+    # 9. N5 (z5py writes in-process; small).
     write_n5(out / "phantom.n5", Phantom((192, 192, 192), seed=7), (192, 192, 192), (1.0, 1.0, 1.0), 3)
 
     du = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())

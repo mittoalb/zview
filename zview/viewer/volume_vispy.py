@@ -107,7 +107,9 @@ class VispyVolumeView(QtWidgets.QWidget):
 
         bar = QtWidgets.QWidget()
         bar.setObjectName("vol3dBar")
-        bar.setStyleSheet("#vol3dBar { background:#262626; border-bottom:1px solid #3a3a3a; }")
+        bar.setStyleSheet("#vol3dBar { background:#262626; border-bottom:1px solid #3a3a3a; }"
+                          "#vol3dBar QToolButton:checked { background:#2a82da; color:white;"
+                          " border:1px solid #3b93eb; border-radius:3px; }")
         hb = QtWidgets.QHBoxLayout(bar)
         hb.setContentsMargins(4, 2, 4, 2)
         hb.setSpacing(4)

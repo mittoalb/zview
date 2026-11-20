@@ -87,12 +87,15 @@ def main():
         pump(2)
         w = v.view_3d_only
         if hasattr(w, "preset_combo"):                # VTK pane
+            w.shadows_btn.setChecked(True)            # the showcase shot uses shadows
             w._on_preset(w.preset_combo.findData("interior"))
         else:                                         # VisPy pane
             w.mode_combo.setCurrentIndex(w.mode_combo.findData("translucent"))
             w.cmap_combo.setCurrentIndex(w.cmap_combo.findText("viridis"))
         pump(5)
         shot(v, "view3d")
+        if hasattr(w, "shadows_btn"):
+            w.shadows_btn.setChecked(False)
 
         v.set_layout("quad")
         v.open_path(str(a.data / "phantom_aniso_5d.zarr"))
@@ -114,6 +117,20 @@ def main():
                     w3._set_class(val, visible=False)
             pump(5)
         shot(v, "view3d_labels")
+
+        # HDF5: one stored level, strided virtual levels; render L1 in 3D
+        # (a click in the Pyramid table) so the chosen-level marker shows.
+        h5 = a.data / "phantom_scan.h5"
+        if h5.exists():
+            v.set_layout("quad")
+            v.open_path(f"{h5}:/exchange/data")
+            wait_3d()
+            v.set_position(300, 330, 180)
+            v._on_pyramid_clicked(1, 0)
+            pump(0.5)
+            wait_3d()
+            pump(4)
+            shot(v, "quad_h5")
 
         v.set_layout("quad")
         v.open_path(str(a.data / "phantom_iso.zarr"))

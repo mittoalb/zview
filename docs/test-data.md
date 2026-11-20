@@ -32,6 +32,7 @@ multi-GB volume uses little memory. Defaults: about 30 s and 2 GB on disk;
 | `phantom.n5` | N5 (z5py) | The N5 backend; numbered levels without metadata |
 | `numbered_no_metadata.zarr` | Zarr v2 | Level discovery without attributes |
 | `image_2d.zarr` | Zarr v3, 4096² uint8 | A 2D image as a one-slice volume |
+| `phantom_scan.h5` | HDF5 (DXchange layout), uint16 512³, contiguous | The [HDF5 path](viewer.md#hdf5-files): strided virtual levels, direct reads, voxel size from an attribute; the small `data_white` / `data_dark` datasets make the viewer ask which one to open |
 | `big_single_level.zarr` | Zarr v3, 768×2048×2048 uint8 (3.2 GB raw), **one level** | The large-data path: strided 3D reads, progress, cancel |
 
 There's also `scripts/make_test_zarr.py`. It writes a 6-level pyramid of

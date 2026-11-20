@@ -28,6 +28,13 @@ $ zview /tmp/zview_demo/data/phantom_iso.zarr --layout quad
 - **Ctrl+wheel** or **PgUp/PgDn** steps through slices. **A** sets the
   contrast automatically. **Ctrl+1…4** switches layouts.
 
+HDF5 files open the same way, with no pyramid needed. zview builds coarser
+levels on the fly by taking one voxel every 2, 4, 8, … voxels:
+
+```console
+$ zview /tmp/zview_demo/data/phantom_scan.h5:/exchange/data
+```
+
 More in [](viewer.md).
 
 ## 3. Make a presentation render

@@ -192,7 +192,10 @@ class VTKVolumeView(QtWidgets.QWidget):
 
         bar = QtWidgets.QWidget()
         bar.setObjectName("vtkBar")
-        bar.setStyleSheet("#vtkBar { background:#262626; border-bottom:1px solid #3a3a3a; }")
+        # Checked tool buttons (Shadows, ⚙) must look on: the theme alone barely shows it.
+        bar.setStyleSheet("#vtkBar { background:#262626; border-bottom:1px solid #3a3a3a; }"
+                          "#vtkBar QToolButton:checked { background:#2a82da; color:white;"
+                          " border:1px solid #3b93eb; border-radius:3px; }")
         hb = QtWidgets.QHBoxLayout(bar)
         hb.setContentsMargins(4, 2, 4, 2)
         hb.setSpacing(4)

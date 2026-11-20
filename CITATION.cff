@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use zview, please cite the software repository as below."
+title: "zview: viewer and renderer for large 3D image volumes"
+type: software
+authors:
+  - family-names: Mittone
+    given-names: Alberto
+repository-code: "https://github.com/mittoalb/zview"
+url: "https://github.com/mittoalb/zview"
+version: 0.1.0
+keywords:
+  - volume rendering
+  - Zarr
+  - OME-NGFF
+  - HDF5
+  - tomography
+  - microscopy
+  - image viewer
